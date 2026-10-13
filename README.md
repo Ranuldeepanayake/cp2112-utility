@@ -172,6 +172,8 @@ mingw32-make check-toolchain
 mingw32-make
 ```
 
+For an exact match with CI, use the pinned WinLibs archive `x86_64-16.2.0-release-mcf-seh-ucrt-rt_v14-rev1.7z` and put its `mingw64\bin` directory first on `PATH`. Its SHA-256 is `f4f9a32681afd5862bdc060dfcf51169e3fc7b4854c1d6d304ba249a51f1df2a`.
+
 The Makefile compiles all application and driver sources into `bin\cp2112_console.exe`. It creates `bin/` and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated `.exe` files are ignored by Git.
 
 Other Make targets are:

@@ -26,10 +26,71 @@ jobs:
        github.event.pull_request.head.ref == 'develop' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.base.ref == 'main')
-    runs-on: windows-latest
+    runs-on: windows-2025
 
-    # Action: check out the exact source revision that will be compiled.
+    # Action: use the exact same native MinGW-w64 toolchain for every CI build.
     steps:
+      # Action: cache the pinned archive and extracted toolchain between runs.
+      - name: Cache pinned WinLibs toolchain
+        id: winlibs-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/winlibs-x86_64-16.2.0.7z
+            ${{ runner.temp }}/winlibs-x86_64-16.2.0
+          key: winlibs-windows-2025-x86_64-16.2.0-mcf-seh-ucrt-rt_v14-rev1
+
+      - name: Use pinned WinLibs toolchain
+        shell: pwsh
+        env:
+          WINLIBS_URL: https://github.com/niXman/mingw-builds-binaries/releases/download/16.2.0-rt_v14-rev1/x86_64-16.2.0-release-mcf-seh-ucrt-rt_v14-rev1.7z
+          WINLIBS_SHA256: f4f9a32681afd5862bdc060dfcf51169e3fc7b4854c1d6d304ba249a51f1df2a
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'winlibs-x86_64-16.2.0.7z'
+          $toolchainRoot = Join-Path $env:RUNNER_TEMP 'winlibs-x86_64-16.2.0'
+          if (-not (Test-Path $archive)) {
+            Write-Host 'WinLibs archive was not restored from cache; downloading it.'
+            Invoke-WebRequest -Uri $env:WINLIBS_URL -OutFile $archive
+          } else {
+            Write-Host 'Using the cached WinLibs archive.'
+          }
+
+          $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:WINLIBS_SHA256) {
+            throw "WinLibs SHA-256 mismatch. Expected $env:WINLIBS_SHA256, received $actualHash"
+          }
+
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+            throw '7z.exe was not found on the GitHub runner.'
+          }
+          $compiler = Get-ChildItem -Path $toolchainRoot -Filter 'g++.exe' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Directory.Name -eq 'bin' } |
+            Select-Object -First 1
+          if (-not $compiler) {
+            if (Test-Path $toolchainRoot) {
+              Remove-Item -Path $toolchainRoot -Recurse -Force
+            }
+            New-Item -ItemType Directory -Force $toolchainRoot | Out-Null
+            7z x $archive "-o$toolchainRoot" -y | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+              throw "WinLibs extraction failed with exit code $LASTEXITCODE"
+            }
+          }
+
+          $compiler = Get-ChildItem -Path $toolchainRoot -Filter 'g++.exe' -Recurse |
+            Where-Object { $_.Directory.Name -eq 'bin' } |
+            Select-Object -First 1
+          if (-not $compiler) {
+            throw "g++.exe was not found in the extracted WinLibs archive: $toolchainRoot"
+          }
+          $compilerBin = $compiler.Directory.FullName
+          $compilerBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:Path = "$compilerBin;$env:Path"
+          Write-Host "Using pinned compiler from $compilerBin"
+          & (Join-Path $compilerBin 'g++') --version
+          & (Join-Path $compilerBin 'g++') -dumpmachine
+
+      # Action: check out the exact source revision that will be compiled.
       - name: Check out source
         uses: actions/checkout@v4
         with:
