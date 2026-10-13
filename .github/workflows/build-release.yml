@@ -265,6 +265,24 @@ jobs:
           if ($bundled.Count -eq 0) {
             throw 'No MinGW runtime DLL was bundled; the release may fail on machines without MinGW installed.'
           }
+
+          # Explicitly include the runtime names shipped by the pinned WinLibs
+          # archive, including newer libwinpthread-2.dll builds.
+          $explicitRuntimeFiles = Get-ChildItem -Path $toolchainBin -File |
+            Where-Object { $_.Name -match '^(libgcc_s_seh-\d+\.dll|libstdc\+\+-\d+\.dll|libwinpthread-\d+\.dll)$' }
+          foreach ($runtimeFile in $explicitRuntimeFiles) {
+            Copy-Item $runtimeFile.FullName bin -Force
+            if ($bundled -notcontains $runtimeFile.Name) {
+              $bundled += $runtimeFile.Name
+            }
+          }
+
+          $requiredRuntimeNames = @('libgcc_s_seh-1.dll', 'libstdc++-6.dll') +
+            @($explicitRuntimeFiles | Where-Object { $_.Name -like 'libwinpthread-*.dll' } | ForEach-Object Name)
+          $missingPackagedRuntime = @($requiredRuntimeNames | Where-Object { -not (Test-Path (Join-Path 'bin' $_)) })
+          if ($missingPackagedRuntime.Count -gt 0) {
+            throw "Required MinGW runtime DLL(s) were not packaged: $($missingPackagedRuntime -join ', ')"
+          }
           Write-Host "Bundled runtime DLLs: $($bundled -join ', ')"
 
       # Action: commit and push metadata only after compilation succeeds.
