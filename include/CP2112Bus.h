@@ -2,6 +2,7 @@
 #pragma once
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -49,9 +50,24 @@ struct Api {
     GetLibraryVersionFn getLibraryVersion = nullptr;
 
     template<class T> bool load(T& fn, const char* name, std::string& error) {
-        fn = reinterpret_cast<T>(GetProcAddress(dll, name));
-        if (!fn) error = std::string("Missing API export: ") + name;
-        return fn != nullptr;
+        // GetProcAddress exposes a generic FARPROC. Windows guarantees that
+        // the exported function address can be used with its declared API
+        // signature, but GCC warns about a direct function-pointer cast.
+        const FARPROC symbol = GetProcAddress(dll, name);
+        if (!symbol) {
+            fn = nullptr;
+            error = std::string("Missing API export: ") + name;
+            return false;
+        }
+
+        // Copy the pointer representation across the Windows loader boundary
+        // without an incompatible function-pointer cast. The size assertion
+        // prevents this wrapper from being used with an incompatible pointer
+        // representation on a different target architecture.
+        static_assert(sizeof(T) == sizeof(FARPROC),
+                      "Loaded API function pointer size does not match FARPROC");
+        std::memcpy(&fn, &symbol, sizeof(fn));
+        return true;
     }
     bool init(const std::string& dllPath, std::string& error) {
         dll = LoadLibraryA(dllPath.c_str());
