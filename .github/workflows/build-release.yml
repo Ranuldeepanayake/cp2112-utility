@@ -38,6 +38,17 @@ jobs:
 
     # Action: check out the exact source revision that will be compiled.
     steps:
+      # Action: install the 32-bit MinGW-w64 toolchain required by the bundled
+      # 32-bit Silicon Labs CP2112 DLLs.
+      - name: Install 32-bit MinGW-w64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          update: true
+          install: >-
+            mingw-w64-i686-toolchain
+          path-type: inherit
+
       - name: Check out source
         uses: actions/checkout@v4
         with:
@@ -88,8 +99,8 @@ jobs:
           }
           g++ --version
           $target = (& g++ -dumpmachine).Trim()
-          if ($target -notmatch 'mingw') {
-            throw "The available g++ is not a MinGW toolchain: $target"
+          if ($target -notmatch 'i686|mingw32') {
+            throw "The available g++ is not the required 32-bit MinGW toolchain: $target"
           }
 
       # Action: compile the executable using the artifact name as its output filename.
@@ -100,11 +111,45 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force bin, logs | Out-Null
           Get-ChildItem bin -Filter '*.exe' -File | Remove-Item -Force
-          g++ -std=c++17 -O2 -Wall -Wextra -Iinclude `
+          g++ -m32 -std=c++17 -O2 -Wall -Wextra -Iinclude `
             src\main.cpp src\Application.cpp src\DriverRegistry.cpp `
             drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp `
             drivers\DS3231.cpp drivers\BQ4050.cpp `
             -o "bin\$env:ARTIFACT_NAME.exe"
+
+      # Action: verify that the executable and Silicon Labs DLLs use the same
+      # PE architecture, preventing Windows error 193 packages.
+      - name: Check executable and SDK DLL architectures
+        shell: pwsh
+        env:
+          ARTIFACT_NAME: ${{ steps.package.outputs.name }}
+        run: |
+          $toolchainBin = Split-Path (Get-Command g++).Source
+          $objdump = Join-Path $toolchainBin 'objdump.exe'
+          $target = (& g++ -dumpmachine).Trim()
+          $expectedFormat = if ($target -match 'x86_64|amd64') {
+            'pei-x86-64'
+          } elseif ($target -match 'i[3-6]86|mingw32') {
+            'pei-i386'
+          } else {
+            throw "Unsupported compiler architecture target: $target"
+          }
+
+          $files = @(
+            "bin\$env:ARTIFACT_NAME.exe",
+            'bin\SLABHIDDevice.dll',
+            'bin\SLABHIDtoSMBus.dll'
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) {
+              throw "Required architecture-check file is missing: $file"
+            }
+            $format = (& $objdump -f $file | Select-String 'file format').ToString()
+            if ($format -notmatch $expectedFormat) {
+              throw "Architecture mismatch in $file. Compiler target '$target' requires '$expectedFormat', but objdump reported: $format"
+            }
+            Write-Host "$file matches $expectedFormat"
+          }
 
       # Action: bundle the MinGW runtime DLLs required by the compiled executable.
       - name: Bundle MinGW runtime DLLs

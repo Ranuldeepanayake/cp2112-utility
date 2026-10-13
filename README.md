@@ -155,7 +155,7 @@ bin/
 └── SLABHIDDevice.dll
 ```
 
-The DLLs must match the architecture of the executable: use 64-bit DLLs for a 64-bit build, or 32-bit DLLs for a 32-bit build. Keep the DLL versions compatible with one another and with the SDK.
+The DLLs must match the architecture of the executable. This project uses the 32-bit Silicon Labs DLLs, so the GitHub Actions workflow installs the 32-bit MinGW-w64 toolchain and builds a 32-bit executable with `-m32`. Keep the DLL versions compatible with one another and with the SDK. The workflow checks this before packaging; a mismatch is rejected instead of producing a package that fails with Windows error 193.
 
 The source dynamically loads `SLABHIDtoSMBus.dll`. It does not require an MSVC import library for this dynamic-loading approach.
 
