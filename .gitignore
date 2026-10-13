@@ -3,3 +3,6 @@
 
 # Locally compiled executables are build outputs and must not be committed.
 *.exe
+
+# Locally compiled Windows resource objects are build outputs too.
+*.o

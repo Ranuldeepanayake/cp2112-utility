@@ -5,6 +5,7 @@ CXX ?= g++
 CXXFLAGS ?= -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude
 
 TARGET := bin/cp2112_console.exe
+RESOURCE := bin/app-res.o
 SOURCES := \
 	src/main.cpp \
 	src/Application.cpp \
@@ -27,6 +28,8 @@ check-toolchain:
 	$(CXX) --version
 	@$(CXX) -dumpmachine | findstr /I mingw >NUL || (echo g++ is not a MinGW toolchain.& exit /B 1)
 	@$(CXX) -dumpmachine | findstr /I x86_64 >NUL || (echo g++ is not a 64-bit MinGW toolchain.& exit /B 1)
+	where windres
+	windres --version
 
 bin:
 	@if not exist "bin" mkdir "bin"
@@ -34,8 +37,11 @@ bin:
 logs:
 	@if not exist "logs" mkdir "logs"
 
-$(TARGET): $(SOURCES) $(HEADERS) | bin logs
-	$(CXX) $(CXXFLAGS) $(SOURCES) -o $@
+$(RESOURCE): resources/app.rc resources/cp2112.ico | bin
+	windres $< -O coff -o $@
+
+$(TARGET): $(SOURCES) $(HEADERS) $(RESOURCE) | bin logs
+	$(CXX) $(CXXFLAGS) $(SOURCES) $(RESOURCE) -o $@
 
 run: build
 	$(TARGET) config\devices.ini

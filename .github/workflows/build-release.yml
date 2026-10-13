@@ -165,6 +165,26 @@ jobs:
             throw "The available g++ is not the required 64-bit MinGW toolchain: $target"
           }
 
+          # Confirm that the same pinned toolchain provides the Windows resource compiler.
+          $resourceCompiler = Get-Command windres -ErrorAction SilentlyContinue
+          if (-not $resourceCompiler) {
+            throw 'windres was not found beside the pinned MinGW-w64 toolchain.'
+          }
+          windres --version
+
+      # Action: compile the multi-resolution executable icon resource.
+      - name: Build Windows icon resource
+        shell: pwsh
+        run: |
+          # Ensure the resource output directory exists before invoking windres.
+          New-Item -ItemType Directory -Force bin | Out-Null
+
+          # Convert the .rc definition and .ico image into a linkable COFF object.
+          windres resources\app.rc -O coff -o bin\app-res.o
+          if ($LASTEXITCODE -ne 0) {
+            throw "windres failed with exit code $LASTEXITCODE"
+          }
+
       # Action: compile the CLI executable using its pipeline-specific name.
       - name: Build executable
         shell: pwsh
@@ -175,11 +195,12 @@ jobs:
           New-Item -ItemType Directory -Force bin, logs | Out-Null
           Get-ChildItem bin -Filter '*.exe' -File | Remove-Item -Force
 
-          # Compile and link all application and device-driver sources.
+          # Compile and link all application sources together with the icon resource.
           g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude `
             src\main.cpp src\Application.cpp src\DriverRegistry.cpp `
             drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp `
             drivers\DS3231.cpp drivers\BQ4050.cpp `
+            bin\app-res.o `
             -o "bin\$env:EXECUTABLE_NAME.exe"
 
       # Action: verify that the executable and Silicon Labs DLLs use the same
