@@ -176,7 +176,7 @@ For an exact match with CI, use the pinned WinLibs archive `x86_64-16.2.0-releas
 
 `mingw32-make` is the traditional Windows executable name for MinGW's GNU Make program. It does not mean that the build is 32-bit; the compiler target is controlled by `g++`, and this project explicitly uses the 64-bit `x86_64-w64-mingw32` compiler with `-m64`. There is normally no separate `mingw64-make` executable.
 
-The Makefile compiles all application and driver sources into `bin\cp2112_console.exe`. It creates `bin/` and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated `.exe` files are ignored by Git.
+The Makefile compiles all application and driver sources, embeds `resources\cp2112.ico` through the intermediate `build\app-res.o` resource object, and produces `bin\cp2112_console.exe`. It creates `bin/`, `build/`, and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated build outputs are ignored by Git.
 
 Other Make targets are:
 
@@ -196,14 +196,20 @@ New-Item -ItemType Directory -Force bin, logs
 ### 2. Compile and link the main application and all drivers
 
 ```powershell
-g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp -o bin\cp2112_console.exe
+New-Item -ItemType Directory -Force build, bin, logs
+windres resources\app.rc -O coff -o build\app-res.o
+g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp build\app-res.o -o bin\cp2112_console.exe
 ```
 
 The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
 
 If you add a driver, include its source file in this command.
 
-The direct command above is equivalent to the Makefile build. If a new driver source file is added, update both the direct command and the `SOURCES` list in `Makefile`.
+The direct commands above are equivalent to the Makefile build. If a new driver source file is added, update both the direct command and the `SOURCES` list in `Makefile`.
+
+### Executable icon
+
+The executable icon is defined by `resources\app.rc` and `resources\cp2112.ico`. The ICO contains 16×16, 32×32, 48×48, and 256×256 images. Both the Makefile and GitHub Actions compile the resource with `windres` and link the intermediate `build\app-res.o` into `cp2112_console.exe`. The CI toolchain must provide `windres` alongside `g++`.
 
 ### 3. Verify the output
 
