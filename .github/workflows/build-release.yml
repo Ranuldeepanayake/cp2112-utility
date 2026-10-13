@@ -118,8 +118,8 @@ jobs:
           # Build the timestamped beta or production state used in all CI names.
           $timestamp = Get-Date -Format 'ddMMyyyyHHmm'
           $state = if ('${{ github.event.action }}' -eq 'closed' -and '${{ github.event.pull_request.merged }}' -eq 'true') { 'prod' } else { 'beta' }
-          $executableName = "cp2112_utility-$timestamp-$env:GITHUB_RUN_NUMBER-$state"
-          $packageName = "cp2112_console-$timestamp-$env:GITHUB_RUN_NUMBER-$state"
+          $executableName = "cp2112_console-$timestamp-$env:GITHUB_RUN_NUMBER-$state"
+          $packageName = "cp2112_utility-$timestamp-$env:GITHUB_RUN_NUMBER-$state"
           $beta = if ($state -eq 'beta') { 'true' } else { 'false' }
           # Publish the generated values to subsequent workflow steps.
           "executable_name=$executableName" >> $env:GITHUB_OUTPUT
