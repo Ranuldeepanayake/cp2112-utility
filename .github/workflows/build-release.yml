@@ -176,11 +176,11 @@ jobs:
       - name: Build Windows icon resource
         shell: pwsh
         run: |
-          # Ensure the resource output directory exists before invoking windres.
-          New-Item -ItemType Directory -Force bin | Out-Null
+          # Keep intermediate resource objects outside bin so they are not packaged.
+          New-Item -ItemType Directory -Force build | Out-Null
 
           # Convert the .rc definition and .ico image into a linkable COFF object.
-          windres resources\app.rc -O coff -o bin\app-res.o
+          windres resources\app.rc -O coff -o build\app-res.o
           if ($LASTEXITCODE -ne 0) {
             throw "windres failed with exit code $LASTEXITCODE"
           }
@@ -200,7 +200,7 @@ jobs:
             src\main.cpp src\Application.cpp src\DriverRegistry.cpp `
             drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp `
             drivers\DS3231.cpp drivers\BQ4050.cpp `
-            bin\app-res.o `
+            build\app-res.o `
             -o "bin\$env:EXECUTABLE_NAME.exe"
 
       # Action: verify that the executable and Silicon Labs DLLs use the same
