@@ -120,37 +120,53 @@ jobs:
             throw "objdump.exe was not found beside g++ at $toolchainBin"
           }
 
-          $dependencies = & $objdump -p $executable |
-            Select-String 'DLL Name:' |
-            ForEach-Object { ($_ -split 'DLL Name:\s*', 2)[1].Trim() } |
-            Sort-Object -Unique
-
-          $runtimeDependencies = @($dependencies | Where-Object {
-            $_ -match '^(libgcc|libstdc\+\+|libwinpthread|mingw|libssp|libatomic|libgomp|libquadmath)'
-          })
-
           $searchDirectories = @($toolchainBin) + ($env:Path -split ';' | Where-Object { $_ }) |
             Select-Object -Unique
           $runtimePaths = @{}
           $missingRuntime = @()
-          foreach ($dependency in $runtimeDependencies) {
-            $found = $null
-            foreach ($directory in $searchDirectories) {
-              $candidate = Join-Path $directory $dependency
-              if (Test-Path $candidate) {
-                $found = $candidate
-                break
+          $inspected = @{}
+          $filesToInspect = New-Object System.Collections.Queue
+          $filesToInspect.Enqueue($executable)
+
+          # Walk transitive imports because libstdc++ can import libwinpthread.
+          while ($filesToInspect.Count -gt 0) {
+            $currentFile = $filesToInspect.Dequeue()
+            $resolvedCurrentFile = (Resolve-Path $currentFile).Path.ToLowerInvariant()
+            if ($inspected.ContainsKey($resolvedCurrentFile)) { continue }
+            $inspected[$resolvedCurrentFile] = $true
+
+            $dependencies = & $objdump -p $currentFile |
+              Select-String 'DLL Name:' |
+              ForEach-Object { ($_ -split 'DLL Name:\s*', 2)[1].Trim() } |
+              Sort-Object -Unique
+
+            foreach ($dependency in $dependencies) {
+              if ($dependency -notmatch '^(libgcc|libstdc\+\+|libwinpthread|mingw|libssp|libatomic|libgomp|libquadmath)') {
+                continue
+              }
+              if (-not $runtimePaths.ContainsKey($dependency)) {
+                $found = $null
+                foreach ($directory in $searchDirectories) {
+                  $candidate = Join-Path $directory $dependency
+                  if (Test-Path $candidate) {
+                    $found = $candidate
+                    break
+                  }
+                }
+                if ($found) {
+                  $runtimePaths[$dependency] = $found
+                  $filesToInspect.Enqueue($found)
+                } else {
+                  $missingRuntime += $dependency
+                }
               }
             }
-            if ($found) {
-              $runtimePaths[$dependency] = $found
-            } else {
-              $missingRuntime += $dependency
-            }
           }
+          $missingRuntime = @($missingRuntime | Sort-Object -Unique)
           if ($missingRuntime.Count -gt 0) {
             throw "Required MinGW runtime DLL(s) were not found on the runner PATH: $($missingRuntime -join ', ')"
           }
+          $runtimeDependencies = @($runtimePaths.Keys | Sort-Object)
           Write-Host "Imported MinGW runtime DLLs: $($runtimeDependencies -join ', ')"
 
           $bundled = @()
