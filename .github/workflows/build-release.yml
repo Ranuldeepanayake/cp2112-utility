@@ -1,0 +1,126 @@
+# Triggers on develop-to-main pull requests when opened or approved, and on
+# manual workflow dispatches from develop only.
+name: Build and release CP2112 utility
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+  pull_request_review:
+    branches:
+      - main
+    types:
+      - submitted
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    # PR builds are limited to an open/approved PR from develop to main.
+    # Manual runs are accepted only when the selected ref is develop.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop') ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'opened' &&
+       github.event.pull_request.head.ref == 'develop' &&
+       github.event.pull_request.base.ref == 'main') ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.state == 'approved' &&
+       github.event.pull_request.head.ref == 'develop' &&
+       github.event.pull_request.base.ref == 'main')
+    runs-on: windows-latest
+
+    # Action: check out the exact source revision that will be compiled.
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # Build the develop source for PR events, rather than the synthetic
+          # merge ref GitHub creates for pull_request workflows.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.pull_request.head.sha }}
+
+      # Action: create the artifact name before compiling so the executable
+      # filename and package name are identical.
+      - name: Create release package name
+        id: package
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          $date = Get-Date -Format 'ddMMyyyy'
+          $suffix = if ($env:EVENT_NAME -eq 'pull_request_review' -and '${{ github.event.review.state }}' -eq 'approved') { '' } else { '-beta' }
+          $name = "cp2112_console-$date-$env:GITHUB_RUN_NUMBER$suffix"
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      # Action: verify that the README-required MinGW-w64 C++ toolchain exists.
+      - name: Check MinGW-w64 toolchain
+        shell: pwsh
+        run: |
+          $compiler = Get-Command g++ -ErrorAction SilentlyContinue
+          if (-not $compiler) {
+            throw 'g++ was not found on the Windows runner. Install MinGW-w64 or update the runner toolchain configuration.'
+          }
+          g++ --version
+          $target = (& g++ -dumpmachine).Trim()
+          if ($target -notmatch 'mingw') {
+            throw "The available g++ is not a MinGW toolchain: $target"
+          }
+
+      # Action: compile the executable using the artifact name as its output filename.
+      - name: Build executable
+        shell: pwsh
+        env:
+          ARTIFACT_NAME: ${{ steps.package.outputs.name }}
+        run: |
+          New-Item -ItemType Directory -Force bin, logs | Out-Null
+          Get-ChildItem bin -Filter '*.exe' -File | Remove-Item -Force
+          g++ -std=c++17 -O2 -Wall -Wextra -Iinclude `
+            src\main.cpp src\Application.cpp src\DriverRegistry.cpp `
+            drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp `
+            drivers\DS3231.cpp drivers\BQ4050.cpp `
+            -o "bin\$env:ARTIFACT_NAME.exe"
+
+      # Action: package the complete bin directory as the downloadable release asset.
+      - name: Package bin directory
+        id: archive
+        shell: pwsh
+        env:
+          ARTIFACT_NAME: ${{ steps.package.outputs.name }}
+        run: |
+          $package = "$env:ARTIFACT_NAME.zip"
+          Compress-Archive -Path bin -DestinationPath $package -Force
+          "package=$package" >> $env:GITHUB_OUTPUT
+
+      # Action: upload the package as a workflow artifact.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.archive.outputs.package }}
+          if-no-files-found: error
+
+      # Action: create the matching Git tag and publish the package as a release.
+      - name: Create GitHub release and matching tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NAME: ${{ steps.package.outputs.name }}
+          PACKAGE_PATH: ${{ steps.archive.outputs.package }}
+          IS_BETA: ${{ github.event_name != 'pull_request_review' }}
+          TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.head.sha }}
+        shell: pwsh
+        run: |
+          $args = @(
+            'release', 'create', $env:RELEASE_NAME, $env:PACKAGE_PATH,
+            '--title', $env:RELEASE_NAME,
+            '--target', $env:TARGET_SHA,
+            '--generate-notes'
+          )
+          if ($env:IS_BETA -eq 'true') {
+            $args += '--prerelease'
+          }
+          gh @args
