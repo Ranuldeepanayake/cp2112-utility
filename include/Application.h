@@ -12,7 +12,7 @@
 struct AppConfig {
     std::string bridgeDll = "SLABHIDtoSMBus.dll";
     std::string logDir = "logs";
-    std::string buildTimestamp = "00000000";
+    std::string buildTimestamp = "000000000000";
     std::string buildNumber = "0";
     bool betaBuild = false;
     unsigned defaultRefreshSeconds = 2;

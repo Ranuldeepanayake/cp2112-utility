@@ -46,8 +46,11 @@ jobs:
           WINLIBS_URL: https://github.com/niXman/mingw-builds-binaries/releases/download/16.2.0-rt_v14-rev1/x86_64-16.2.0-release-mcf-seh-ucrt-rt_v14-rev1.7z
           WINLIBS_SHA256: f4f9a32681afd5862bdc060dfcf51169e3fc7b4854c1d6d304ba249a51f1df2a
         run: |
+          # Define the archive and extraction locations inside the runner's temporary directory.
           $archive = Join-Path $env:RUNNER_TEMP 'winlibs-x86_64-16.2.0.7z'
           $toolchainRoot = Join-Path $env:RUNNER_TEMP 'winlibs-x86_64-16.2.0'
+
+          # Download the archive only when the cache did not restore it.
           if (-not (Test-Path $archive)) {
             Write-Host 'WinLibs archive was not restored from cache; downloading it.'
             Invoke-WebRequest -Uri $env:WINLIBS_URL -OutFile $archive
@@ -55,18 +58,22 @@ jobs:
             Write-Host 'Using the cached WinLibs archive.'
           }
 
+          # Verify the downloaded or cached archive before using it.
           $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actualHash -ne $env:WINLIBS_SHA256) {
             throw "WinLibs SHA-256 mismatch. Expected $env:WINLIBS_SHA256, received $actualHash"
           }
 
+          # Confirm that the runner has the extraction utility.
           if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
             throw '7z.exe was not found on the GitHub runner.'
           }
+          # Reuse an extracted compiler when the extraction directory was cached.
           $compiler = Get-ChildItem -Path $toolchainRoot -Filter 'g++.exe' -Recurse -ErrorAction SilentlyContinue |
             Where-Object { $_.Directory.Name -eq 'bin' } |
             Select-Object -First 1
           if (-not $compiler) {
+            # Remove an incomplete extraction and unpack a fresh copy.
             if (Test-Path $toolchainRoot) {
               Remove-Item -Path $toolchainRoot -Recurse -Force
             }
@@ -77,6 +84,7 @@ jobs:
             }
           }
 
+          # Locate the compiler, persist its bin directory for later steps, and report its identity.
           $compiler = Get-ChildItem -Path $toolchainRoot -Filter 'g++.exe' -Recurse |
             Where-Object { $_.Directory.Name -eq 'bin' } |
             Select-Object -First 1
@@ -99,22 +107,27 @@ jobs:
           # merge ref GitHub creates for pull_request workflows.
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.pull_request.head.sha }}
 
-      # Action: create the artifact name before compiling so the executable
-      # filename and package name are identical.
-      - name: Create release package name
+      # Action: create distinct executable and package names with the build
+      # timestamp, run number, and beta/production state.
+      - name: Create release names
         id: package
         shell: pwsh
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          $date = Get-Date -Format 'ddMMyyyy'
-          $suffix = if ('${{ github.event.action }}' -eq 'closed' -and '${{ github.event.pull_request.merged }}' -eq 'true') { '' } else { '-beta' }
-          $name = "cp2112_console-$date-$env:GITHUB_RUN_NUMBER$suffix"
-          $beta = if ($suffix) { 'true' } else { 'false' }
-          "name=$name" >> $env:GITHUB_OUTPUT
-          "build_timestamp=$date" >> $env:GITHUB_OUTPUT
+          # Build the timestamped beta or production state used in all CI names.
+          $timestamp = Get-Date -Format 'ddMMyyyyHHmm'
+          $state = if ('${{ github.event.action }}' -eq 'closed' -and '${{ github.event.pull_request.merged }}' -eq 'true') { 'prod' } else { 'beta' }
+          $executableName = "cp2112_utility-$timestamp-$env:GITHUB_RUN_NUMBER-$state"
+          $packageName = "cp2112_console-$timestamp-$env:GITHUB_RUN_NUMBER-$state"
+          $beta = if ($state -eq 'beta') { 'true' } else { 'false' }
+          # Publish the generated values to subsequent workflow steps.
+          "executable_name=$executableName" >> $env:GITHUB_OUTPUT
+          "package_name=$packageName" >> $env:GITHUB_OUTPUT
+          "build_timestamp=$timestamp" >> $env:GITHUB_OUTPUT
           "build_number=$env:GITHUB_RUN_NUMBER" >> $env:GITHUB_OUTPUT
           "beta=$beta" >> $env:GITHUB_OUTPUT
+          "state=$state" >> $env:GITHUB_OUTPUT
 
       # Action: prepare CI build metadata in the working copy for this build.
       - name: Prepare packaged build metadata
@@ -124,8 +137,11 @@ jobs:
           BUILD_NUMBER: ${{ steps.package.outputs.build_number }}
           BETA: ${{ steps.package.outputs.beta }}
         run: |
+          # Load the checked-in configuration that will be included in the package.
           $configPath = 'config\devices.ini'
           $config = Get-Content $configPath -Raw
+
+          # Replace only CI-managed metadata; preserve all device settings.
           $config = [regex]::Replace($config, '(?m)^build_timestamp=.*$', "build_timestamp=$env:BUILD_TIMESTAMP")
           $config = [regex]::Replace($config, '(?m)^build_number=.*$', "build_number=$env:BUILD_NUMBER")
           $config = [regex]::Replace($config, '(?m)^beta=.*$', "beta=$env:BETA")
@@ -135,39 +151,46 @@ jobs:
       - name: Check MinGW-w64 toolchain
         shell: pwsh
         run: |
+          # Confirm that the compiler is available after the pinned toolchain step.
           $compiler = Get-Command g++ -ErrorAction SilentlyContinue
           if (-not $compiler) {
             throw 'g++ was not found on the Windows runner. Install MinGW-w64 or update the runner toolchain configuration.'
           }
+          # Confirm that the selected compiler targets 64-bit Windows.
           g++ --version
           $target = (& g++ -dumpmachine).Trim()
           if ($target -notmatch 'x86_64|amd64') {
             throw "The available g++ is not the required 64-bit MinGW toolchain: $target"
           }
 
-      # Action: compile the executable using the artifact name as its output filename.
+      # Action: compile the CLI executable using its pipeline-specific name.
       - name: Build executable
         shell: pwsh
         env:
-          ARTIFACT_NAME: ${{ steps.package.outputs.name }}
+          EXECUTABLE_NAME: ${{ steps.package.outputs.executable_name }}
         run: |
+          # Create directories and remove older locally generated executables.
           New-Item -ItemType Directory -Force bin, logs | Out-Null
           Get-ChildItem bin -Filter '*.exe' -File | Remove-Item -Force
+
+          # Compile and link all application and device-driver sources.
           g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude `
             src\main.cpp src\Application.cpp src\DriverRegistry.cpp `
             drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp `
             drivers\DS3231.cpp drivers\BQ4050.cpp `
-            -o "bin\$env:ARTIFACT_NAME.exe"
+            -o "bin\$env:EXECUTABLE_NAME.exe"
 
       # Action: verify that the executable and Silicon Labs DLLs use the same
       # PE architecture, preventing Windows error 193 packages.
       - name: Check executable and SDK DLL architectures
         shell: pwsh
         env:
-          ARTIFACT_NAME: ${{ steps.package.outputs.name }}
+          EXECUTABLE_NAME: ${{ steps.package.outputs.executable_name }}
         run: |
+          # Locate objdump from the exact compiler used for this build.
           $toolchainBin = Split-Path (Get-Command g++).Source
           $objdump = Join-Path $toolchainBin 'objdump.exe'
+          # Determine the PE format expected from the compiler target.
           $target = (& g++ -dumpmachine).Trim()
           $expectedFormat = if ($target -match 'x86_64|amd64') {
             'pei-x86-64'
@@ -177,8 +200,9 @@ jobs:
             throw "Unsupported compiler architecture target: $target"
           }
 
+          # Check the executable and both vendor DLLs before packaging.
           $files = @(
-            "bin\$env:ARTIFACT_NAME.exe",
+            "bin\$env:EXECUTABLE_NAME.exe",
             'bin\SLABHIDDevice.dll',
             'bin\SLABHIDtoSMBus.dll'
           )
@@ -197,16 +221,18 @@ jobs:
       - name: Bundle MinGW runtime DLLs
         shell: pwsh
         env:
-          ARTIFACT_NAME: ${{ steps.package.outputs.name }}
+          EXECUTABLE_NAME: ${{ steps.package.outputs.executable_name }}
         run: |
+          # Locate the executable, objdump, and directories where runtime DLLs may exist.
           $toolchainBin = Split-Path (Get-Command g++).Source
           $objdump = Join-Path $toolchainBin 'objdump.exe'
-          $executable = Join-Path $PWD "bin\$env:ARTIFACT_NAME.exe"
+          $executable = Join-Path $PWD "bin\$env:EXECUTABLE_NAME.exe"
 
           if (-not (Test-Path $objdump)) {
             throw "objdump.exe was not found beside g++ at $toolchainBin"
           }
 
+          # Walk the executable's transitive imports to discover required runtimes.
           $searchDirectories = @($toolchainBin) + ($env:Path -split ';' | Where-Object { $_ }) |
             Select-Object -Unique
           $runtimePaths = @{}
@@ -215,20 +241,22 @@ jobs:
           $filesToInspect = New-Object System.Collections.Queue
           $filesToInspect.Enqueue($executable)
 
-          # Walk transitive imports because libstdc++ can import libwinpthread.
+          # Inspect each imported runtime DLL because dependencies can be transitive.
           while ($filesToInspect.Count -gt 0) {
             $currentFile = $filesToInspect.Dequeue()
             $resolvedCurrentFile = (Resolve-Path $currentFile).Path.ToLowerInvariant()
             if ($inspected.ContainsKey($resolvedCurrentFile)) { continue }
             $inspected[$resolvedCurrentFile] = $true
 
+            # Read imported DLL names from the current executable or runtime DLL.
             $dependencies = & $objdump -p $currentFile |
               Select-String 'DLL Name:' |
               ForEach-Object { ($_ -split 'DLL Name:\s*', 2)[1].Trim() } |
               Sort-Object -Unique
 
+            # Resolve each MinGW runtime from the pinned toolchain directories.
             foreach ($dependency in $dependencies) {
-              if ($dependency -notmatch '^(libgcc|libstdc\+\+|libwinpthread|libmcfthread|mingw|libssp|libatomic|libgomp|libquadmath)') {
+              if ($dependency -notmatch '^(libgcc|libstdc\+\+|libwinpthread|libmcfgthread|mingw|libssp|libatomic|libgomp|libquadmath)') {
                 continue
               }
               if (-not $runtimePaths.ContainsKey($dependency)) {
@@ -249,6 +277,7 @@ jobs:
               }
             }
           }
+          # Stop before packaging if any imported MinGW runtime could not be found.
           $missingRuntime = @($missingRuntime | Sort-Object -Unique)
           if ($missingRuntime.Count -gt 0) {
             throw "Required MinGW runtime DLL(s) were not found on the runner PATH: $($missingRuntime -join ', ')"
@@ -256,6 +285,7 @@ jobs:
           $runtimeDependencies = @($runtimePaths.Keys | Sort-Object)
           Write-Host "Imported MinGW runtime DLLs: $($runtimeDependencies -join ', ')"
 
+          # Copy all imports discovered from the executable and its dependencies.
           $bundled = @()
           foreach ($dependency in $runtimeDependencies) {
             Copy-Item $runtimePaths[$dependency] bin -Force
@@ -266,10 +296,11 @@ jobs:
             throw 'No MinGW runtime DLL was bundled; the release may fail on machines without MinGW installed.'
           }
 
+          # Include the runtime DLL naming variants shipped by WinLibs.
           # Explicitly include the runtime names shipped by the pinned WinLibs
-          # archive, including newer libwinpthread-2.dll builds.
+          # archive, including the MCF runtime libmcfgthread-2.dll.
           $explicitRuntimeFiles = Get-ChildItem -Path $toolchainBin -File |
-            Where-Object { $_.Name -match '^(libgcc_s_seh-\d+\.dll|libstdc\+\+-\d+\.dll|libwinpthread-\d+\.dll|libmcfthread-\d+\.dll)$' }
+            Where-Object { $_.Name -match '^(libgcc_s_seh-\d+\.dll|libstdc\+\+-\d+\.dll|libwinpthread-\d+\.dll|libmcfgthread-\d+\.dll)$' }
           foreach ($runtimeFile in $explicitRuntimeFiles) {
             Copy-Item $runtimeFile.FullName bin -Force
             if ($bundled -notcontains $runtimeFile.Name) {
@@ -277,9 +308,10 @@ jobs:
             }
           }
 
+          # Verify that every required runtime DLL is physically in bin.
           $requiredRuntimeNames = @('libgcc_s_seh-1.dll', 'libstdc++-6.dll') +
             @($explicitRuntimeFiles |
-              Where-Object { $_.Name -like 'libwinpthread-*.dll' -or $_.Name -like 'libmcfthread-*.dll' } |
+              Where-Object { $_.Name -like 'libwinpthread-*.dll' -or $_.Name -like 'libmcfgthread-*.dll' } |
               ForEach-Object Name)
           $missingPackagedRuntime = @($requiredRuntimeNames | Where-Object { -not (Test-Path (Join-Path 'bin' $_)) })
           if ($missingPackagedRuntime.Count -gt 0) {
@@ -296,12 +328,17 @@ jobs:
           SOURCE_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.head.ref }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          # Identify the bot as the author of CI metadata commits.
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # Stage only the generated configuration metadata.
           git add config\devices.ini
           if (git diff --cached --quiet) {
+            # Reuse the checked-out revision when metadata already matches.
             $commit = git rev-parse HEAD
           } else {
+            # Commit and push metadata only after compilation and packaging prerequisites succeed.
             git commit -m "ci: update build metadata for $env:BUILD_NUMBER"
             $repositoryUrl = "https://x-access-token:$env:GITHUB_TOKEN@github.com/$env:GITHUB_REPOSITORY.git"
             git -c credential.helper= -c core.askPass= push $repositoryUrl "HEAD:$env:SOURCE_BRANCH"
@@ -314,9 +351,10 @@ jobs:
         id: archive
         shell: pwsh
         env:
-          ARTIFACT_NAME: ${{ steps.package.outputs.name }}
+          PACKAGE_NAME: ${{ steps.package.outputs.package_name }}
         run: |
-          $package = "$env:ARTIFACT_NAME.zip"
+          # Create the ZIP using the production/beta package name.
+          $package = "$env:PACKAGE_NAME.zip"
           Compress-Archive -Path bin, config -DestinationPath $package -Force
           "package=$package" >> $env:GITHUB_OUTPUT
 
@@ -324,7 +362,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.package.outputs.name }}
+          name: ${{ steps.package.outputs.package_name }}
           path: ${{ steps.archive.outputs.package }}
           if-no-files-found: error
 
@@ -332,18 +370,20 @@ jobs:
       - name: Create GitHub release and matching tag
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_NAME: ${{ steps.package.outputs.name }}
+          RELEASE_NAME: ${{ steps.package.outputs.package_name }}
           PACKAGE_PATH: ${{ steps.archive.outputs.package }}
           IS_BETA: ${{ github.event.action != 'closed' }}
           TARGET_SHA: ${{ steps.metadata.outputs.commit }}
         shell: pwsh
         run: |
+          # Create the GitHub Release, using the package name as both tag and release title.
           $args = @(
             'release', 'create', $env:RELEASE_NAME, $env:PACKAGE_PATH,
             '--title', $env:RELEASE_NAME,
             '--target', $env:TARGET_SHA,
             '--generate-notes'
           )
+          # Mark beta builds as prereleases; merged production builds remain stable releases.
           if ($env:IS_BETA -eq 'true') {
             $args += '--prerelease'
           }
