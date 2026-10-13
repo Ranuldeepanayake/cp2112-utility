@@ -128,17 +128,34 @@ jobs:
           $runtimeDependencies = @($dependencies | Where-Object {
             $_ -match '^(libgcc|libstdc\+\+|libwinpthread|mingw|libssp|libatomic|libgomp|libquadmath)'
           })
-          $missingRuntime = @($runtimeDependencies | Where-Object {
-            -not (Test-Path (Join-Path $toolchainBin $_))
-          })
-          if ($missingRuntime.Count -gt 0) {
-            throw "Required MinGW runtime DLL(s) were not found beside g++: $($missingRuntime -join ', ')"
+
+          $searchDirectories = @($toolchainBin) + ($env:Path -split ';' | Where-Object { $_ }) |
+            Select-Object -Unique
+          $runtimePaths = @{}
+          $missingRuntime = @()
+          foreach ($dependency in $runtimeDependencies) {
+            $found = $null
+            foreach ($directory in $searchDirectories) {
+              $candidate = Join-Path $directory $dependency
+              if (Test-Path $candidate) {
+                $found = $candidate
+                break
+              }
+            }
+            if ($found) {
+              $runtimePaths[$dependency] = $found
+            } else {
+              $missingRuntime += $dependency
+            }
           }
+          if ($missingRuntime.Count -gt 0) {
+            throw "Required MinGW runtime DLL(s) were not found on the runner PATH: $($missingRuntime -join ', ')"
+          }
+          Write-Host "Imported MinGW runtime DLLs: $($runtimeDependencies -join ', ')"
 
           $bundled = @()
           foreach ($dependency in $runtimeDependencies) {
-            $runtimeDll = Join-Path $toolchainBin $dependency
-            Copy-Item $runtimeDll bin -Force
+            Copy-Item $runtimePaths[$dependency] bin -Force
             $bundled += $dependency
           }
 
