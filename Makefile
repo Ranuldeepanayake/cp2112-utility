@@ -1,7 +1,8 @@
 # Windows MinGW build targets for the CP2112 Device Console.
 
 CXX ?= g++
-CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Iinclude
+# Build a 64-bit executable to match the Silicon Labs runtime DLLs.
+CXXFLAGS ?= -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude
 
 TARGET := bin/cp2112_console.exe
 SOURCES := \
@@ -25,6 +26,7 @@ check-toolchain:
 	where $(CXX)
 	$(CXX) --version
 	@$(CXX) -dumpmachine | findstr /I mingw >NUL || (echo g++ is not a MinGW toolchain.& exit /B 1)
+	@$(CXX) -dumpmachine | findstr /I x86_64 >NUL || (echo g++ is not a 64-bit MinGW toolchain.& exit /B 1)
 
 bin:
 	@if not exist "bin" mkdir "bin"

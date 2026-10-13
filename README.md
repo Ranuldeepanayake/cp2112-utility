@@ -131,7 +131,7 @@ Check the compiler:
 g++ --version
 ```
 
-If PowerShell reports that `g++` is not recognized, install MinGW-w64 and add its `bin` directory to the Windows `PATH`.
+If PowerShell reports that `g++` is not recognized, install 64-bit MinGW-w64 and add its `bin` directory to the Windows `PATH`.
 
 ### Hardware
 
@@ -155,7 +155,7 @@ bin/
 └── SLABHIDDevice.dll
 ```
 
-The DLLs must match the architecture of the executable. This project uses the 32-bit Silicon Labs DLLs, so the GitHub Actions workflow installs the 32-bit MinGW-w64 toolchain and builds a 32-bit executable with `-m32`. Keep the DLL versions compatible with one another and with the SDK. The workflow checks this before packaging; a mismatch is rejected instead of producing a package that fails with Windows error 193.
+The DLLs must match the architecture of the executable. This project requires 64-bit Silicon Labs DLLs, so local builds and the GitHub Actions workflow use the available 64-bit MinGW-w64 compiler and build with `-m64`. The workflow checks the compiler and DLL architectures before packaging; a mismatch is rejected instead of producing a package that fails with Windows error 193.
 
 The source dynamically loads `SLABHIDtoSMBus.dll`. It does not require an MSVC import library for this dynamic-loading approach.
 
@@ -165,7 +165,7 @@ Run these commands from the **project root** (the directory containing `src/`, `
 
 ### Recommended: build with Make
 
-Install MinGW-w64 and `mingw32-make`, then run:
+Install 64-bit MinGW-w64 and `mingw32-make`, then run:
 
 ```powershell
 mingw32-make check-toolchain
@@ -192,7 +192,7 @@ New-Item -ItemType Directory -Force bin, logs
 ### 2. Compile and link the main application and all drivers
 
 ```powershell
-g++ -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp -o bin\cp2112_console.exe
+g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp -o bin\cp2112_console.exe
 ```
 
 The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
@@ -239,7 +239,7 @@ The workflow is stored in `.github/workflows/build-release.yml`. It runs for:
 - An approved `develop` to `main` pull request: creates a production build.
 - A manual dispatch from `develop`: creates a beta build.
 
-The workflow checks for MinGW-w64, builds the executable using the artifact name, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
+The workflow checks for an available 64-bit MinGW-w64 compiler, builds the executable using the artifact name, verifies that the executable and Silicon Labs DLLs are 64-bit, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
 
 After compilation succeeds, CI updates `build_timestamp`, `build_number`, and `beta` in `config\devices.ini`, commits those values back to the source branch, and uses that commit for the release tag. If compilation fails, no metadata commit or release tag is created. The workflow must be present on `main` before pull request approval events can trigger production runs.
 
@@ -498,7 +498,7 @@ The driver should use the shared `Bus` abstraction for I²C operations. Do not d
 
 ### `g++` is not recognized
 
-Install MinGW-w64 and add the compiler's `bin` directory to `PATH`. Reopen PowerShell and retry `g++ --version`.
+Install 64-bit MinGW-w64 and add the compiler's `bin` directory to `PATH`. Reopen PowerShell and retry `g++ --version`.
 
 ### Configuration file cannot be opened
 
