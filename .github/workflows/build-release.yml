@@ -1,4 +1,4 @@
-# Triggers on develop-to-main pull requests when opened or approved, and on
+# Triggers on develop-to-main pull requests when opened or merged, and on
 # manual workflow dispatches from develop only.
 name: Build and release CP2112 utility
 
@@ -8,11 +8,7 @@ on:
       - main
     types:
       - opened
-  pull_request_review:
-    branches:
-      - main
-    types:
-      - submitted
+      - closed
   workflow_dispatch:
 
 permissions:
@@ -20,17 +16,13 @@ permissions:
 
 jobs:
   build-and-release:
-    # PR builds are limited to an open/approved PR from develop to main.
+    # PR builds are limited to an open/merged PR from develop to main.
     # Manual runs are accepted only when the selected ref is develop.
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop') ||
       (github.event_name == 'pull_request' &&
-       github.event.action == 'opened' &&
-       github.event.pull_request.head.ref == 'develop' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.base.ref == 'main') ||
-      (github.event_name == 'pull_request_review' &&
-       github.event.review.state == 'approved' &&
+       (github.event.action == 'opened' ||
+        (github.event.action == 'closed' && github.event.pull_request.merged == true)) &&
        github.event.pull_request.head.ref == 'develop' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.base.ref == 'main')
@@ -55,7 +47,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           $date = Get-Date -Format 'ddMMyyyy'
-          $suffix = if ($env:EVENT_NAME -eq 'pull_request_review' -and '${{ github.event.review.state }}' -eq 'approved') { '' } else { '-beta' }
+          $suffix = if ('${{ github.event.action }}' -eq 'closed' -and '${{ github.event.pull_request.merged }}' -eq 'true') { '' } else { '-beta' }
           $name = "cp2112_console-$date-$env:GITHUB_RUN_NUMBER$suffix"
           $beta = if ($suffix) { 'true' } else { 'false' }
           "name=$name" >> $env:GITHUB_OUTPUT
@@ -261,7 +253,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_NAME: ${{ steps.package.outputs.name }}
           PACKAGE_PATH: ${{ steps.archive.outputs.package }}
-          IS_BETA: ${{ github.event_name != 'pull_request_review' }}
+          IS_BETA: ${{ github.event.action != 'closed' }}
           TARGET_SHA: ${{ steps.metadata.outputs.commit }}
         shell: pwsh
         run: |

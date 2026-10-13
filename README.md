@@ -236,10 +236,10 @@ Use paths relative to the working directory from which you launch the applicatio
 The workflow is stored in `.github/workflows/build-release.yml`. It runs for:
 
 - A `develop` to `main` pull request when opened: creates a beta build.
-- An approved `develop` to `main` pull request: creates a production build.
+- A merged `develop` to `main` pull request (`github.event.pull_request.merged == true`): creates a production build.
 - A manual dispatch from `develop`: creates a beta build.
 
-The workflow checks for an available 64-bit MinGW-w64 compiler, builds the executable using the artifact name, verifies that the executable and Silicon Labs DLLs are 64-bit, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
+The workflow checks for an available 64-bit MinGW-w64 compiler, builds the executable using the artifact name, verifies that the executable and Silicon Labs DLLs are 64-bit, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. Opening a `develop` to `main` pull request creates a beta package; closing it as merged (`github.event.pull_request.merged == true`) creates the production package. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
 
 After compilation succeeds, CI updates `build_timestamp`, `build_number`, and `beta` in `config\devices.ini`, commits those values back to the source branch, and uses that commit for the release tag. If compilation fails, no metadata commit or release tag is created. The workflow must be present on `main` before pull request approval events can trigger production runs.
 
