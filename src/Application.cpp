@@ -209,7 +209,17 @@ std::string directoryName(const std::string& path) {
     return separator == std::string::npos ? std::string{} : path.substr(0, separator);
 }
 
-// Resolves config-relative paths against the directory containing the config file.
+// Uses the package root for the standard config directory layout.
+std::string packageBaseDirectory(const std::string& configPath) {
+    const std::string configDirectory = directoryName(configPath);
+    const size_t separator = configDirectory.find_last_of("\\/");
+    const std::string folder = separator == std::string::npos
+        ? configDirectory
+        : configDirectory.substr(separator + 1);
+    return lower(folder) == "config" ? directoryName(configDirectory) : configDirectory;
+}
+
+// Resolves package-relative paths against the package root.
 std::string resolveRelativePath(const std::string& path, const std::string& baseDirectory) {
     return isAbsolutePath(path) ? path : absolutePath(baseDirectory + "\\" + path);
 }
@@ -341,9 +351,9 @@ bool ApplicationService::initialize(const std::string& configPath, std::string& 
     configPath_ = absolutePath(configPath);
     AppConfig loaded;
     if (!loadConfig(configPath_, loaded, error)) return false;
-    const std::string configDirectory = directoryName(configPath_);
-    loaded.bridgeDll = resolveRelativePath(loaded.bridgeDll, configDirectory);
-    loaded.logDir = resolveRelativePath(loaded.logDir, configDirectory);
+    const std::string packageDirectory = packageBaseDirectory(configPath_);
+    loaded.bridgeDll = resolveRelativePath(loaded.bridgeDll, packageDirectory);
+    loaded.logDir = resolveRelativePath(loaded.logDir, packageDirectory);
     config_ = std::move(loaded);
 
     std::string logDirectoryError;
@@ -398,9 +408,9 @@ bool ApplicationService::reload(std::string& error) {
         if (logger_) logger_->audit("Configuration reload failed: " + error);
         return false;
     }
-    const std::string configDirectory = directoryName(configPath_);
-    loaded.bridgeDll = resolveRelativePath(loaded.bridgeDll, configDirectory);
-    loaded.logDir = resolveRelativePath(loaded.logDir, configDirectory);
+    const std::string packageDirectory = packageBaseDirectory(configPath_);
+    loaded.bridgeDll = resolveRelativePath(loaded.bridgeDll, packageDirectory);
+    loaded.logDir = resolveRelativePath(loaded.logDir, packageDirectory);
     bool restartRequired = false;
     size_t enabled = 0;
     size_t deviceCount = 0;
