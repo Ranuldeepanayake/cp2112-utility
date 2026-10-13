@@ -163,6 +163,26 @@ The source dynamically loads `SLABHIDtoSMBus.dll`. It does not require an MSVC i
 
 Run these commands from the **project root** (the directory containing `src/`, `drivers/`, `include/`, and `config/`).
 
+### Recommended: build with Make
+
+Install MinGW-w64 and `mingw32-make`, then run:
+
+```powershell
+mingw32-make check-toolchain
+mingw32-make
+```
+
+The Makefile compiles all application and driver sources into `bin\cp2112_console.exe`. It creates `bin/` and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated `.exe` files are ignored by Git.
+
+Other Make targets are:
+
+```powershell
+mingw32-make run       # Build and run using config\devices.ini
+mingw32-make clean     # Remove locally built .exe files from bin\
+```
+
+The `run` target must be launched from the project or release-package root so that `config\devices.ini`, `bin\`, and `logs\` resolve correctly.
+
 ### 1. Create the output directory if needed
 
 ```powershell
@@ -178,6 +198,8 @@ g++ -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\
 The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
 
 If you add a driver, include its source file in this command.
+
+The direct command above is equivalent to the Makefile build. If a new driver source file is added, update both the direct command and the `SOURCES` list in `Makefile`.
 
 ### 3. Verify the output
 
@@ -208,6 +230,18 @@ To use a different configuration file:
 ```
 
 Use paths relative to the working directory from which you launch the application unless you update the source to resolve paths relative to the executable.
+
+## GitHub Actions build and release pipeline
+
+The workflow is stored in `.github/workflows/build-release.yml`. It runs for:
+
+- A `develop` to `main` pull request when opened: creates a beta build.
+- An approved `develop` to `main` pull request: creates a production build.
+- A manual dispatch from `develop`: creates a beta build.
+
+The workflow checks for MinGW-w64, builds the executable using the artifact name, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
+
+After compilation succeeds, CI updates `build_timestamp`, `build_number`, and `beta` in `config\devices.ini`, commits those values back to the source branch, and uses that commit for the release tag. If compilation fails, no metadata commit or release tag is created. The workflow must be present on `main` before pull request approval events can trigger production runs.
 
 ## Main menu and navigation
 
