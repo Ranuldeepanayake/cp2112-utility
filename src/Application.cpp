@@ -1,3 +1,4 @@
+// Implements application configuration, hardware access, logging, streaming, and scans.
 #include "Application.h"
 #include "DriverRegistry.h"
 #include <algorithm>
@@ -46,7 +47,7 @@ bool parseBool(const std::string& text, bool& value) {
 bool loadConfig(const std::string& path, AppConfig& config, std::string& error) {
     std::ifstream input(path);
     if (!input) {
-        error = "Cannot open config file: " + path;
+        error = "Startup prerequisite warning: required config file is missing or unreadable: " + path;
         return false;
     }
 
@@ -86,6 +87,9 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
         if (!current) {
             if (key == "bridge_dll") config.bridgeDll = value;
             else if (key == "log_dir") config.logDir = value;
+            else if (key == "build_timestamp" && !value.empty()) config.buildTimestamp = value;
+            else if (key == "build_number" && !value.empty()) config.buildNumber = value;
+            else if (key == "beta" && parseBool(value, boolean)) config.betaBuild = boolean;
             else if (key == "default_refresh_seconds" && parseUnsigned(value, number) && number >= 1 && number <= 3600)
                 config.defaultRefreshSeconds = static_cast<unsigned>(number);
             else if (key == "default_log_stream" && parseBool(value, boolean))
@@ -98,6 +102,8 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
                 config.scanEndAddress = static_cast<unsigned>(number);
             else if (key == "scan_clock_hz" && parseUnsigned(value, number) && number >= 1 && number <= 400000)
                 config.scanClockHz = static_cast<unsigned>(number);
+            else if (key == "transfer_timeout_ms" && parseUnsigned(value, number) && number >= 1 && number <= 60000)
+                config.transferTimeoutMs = static_cast<unsigned>(number);
             else if (key == "log_retention_days" && parseUnsigned(value, number) && number <= 36500)
                 config.logRetentionDays = static_cast<unsigned>(number);
             else {
@@ -163,6 +169,48 @@ std::string adapterString(Api& api, DWORD index, DWORD option) {
     const Status status = api.getString(index, DEFAULT_VID, DEFAULT_PID, buffer, option);
     if (status != 0) return "(unavailable; API status " + std::to_string(status) + ")";
     return buffer;
+}
+
+bool regularFileExists(const std::string& path) {
+    const DWORD attributes = GetFileAttributesA(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+std::string siblingFile(const std::string& path, const std::string& filename) {
+    const size_t separator = path.find_last_of("\\/");
+    return separator == std::string::npos ? filename : path.substr(0, separator + 1) + filename;
+}
+
+bool ensureDirectory(const std::string& path, std::string& error) {
+    if (path.empty()) {
+        error = "Log directory path is empty.";
+        return false;
+    }
+
+    const DWORD existingAttributes = GetFileAttributesA(path.c_str());
+    if (existingAttributes != INVALID_FILE_ATTRIBUTES) {
+        if ((existingAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return true;
+        error = "The log directory path is a file: " + path;
+        return false;
+    }
+
+    const size_t separator = path.find_last_of("\\/");
+    if (separator != std::string::npos && separator > 0) {
+        const std::string parent = path.substr(0, separator);
+        if (!ensureDirectory(parent, error)) return false;
+    }
+
+    if (CreateDirectoryA(path.c_str(), nullptr)) return true;
+    const DWORD status = GetLastError();
+    if (status == ERROR_ALREADY_EXISTS) {
+        const DWORD attributes = GetFileAttributesA(path.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return true;
+    }
+    error = "Cannot create log directory '" + path + "' (Windows error " +
+            std::to_string(status) + ")";
+    return false;
 }
 
 bool isTimestampedLog(const std::string& name) {
@@ -258,7 +306,29 @@ bool ApplicationService::initialize(const std::string& configPath, std::string& 
     AppConfig loaded;
     if (!loadConfig(configPath_, loaded, error)) return false;
     config_ = std::move(loaded);
+
+    std::string logDirectoryError;
+    if (!ensureDirectory(config_.logDir, logDirectoryError)) {
+        error = "Startup prerequisite warning: " + logDirectoryError;
+        return false;
+    }
+
+    std::vector<std::string> missingFiles;
+    if (!regularFileExists(config_.bridgeDll)) missingFiles.push_back(config_.bridgeDll);
+    const std::string deviceDll = siblingFile(config_.bridgeDll, "SLABHIDDevice.dll");
+    if (!regularFileExists(deviceDll)) missingFiles.push_back(deviceDll);
+    if (!missingFiles.empty()) {
+        error = "Startup prerequisite warning: required DLL file(s) are missing:";
+        for (const std::string& file : missingFiles) error += "\n - " + file;
+        return false;
+    }
+
     logger_ = std::make_unique<Logger>(config_.logDir);
+    if (!logger_->available()) {
+        error = "Startup prerequisite warning: cannot create an audit log in '" +
+                config_.logDir + "'.";
+        return false;
+    }
     logger_->audit("Application started; config=" + configPath_);
     logger_->audit("Registered device definitions loaded: " + std::to_string(config_.devices.size()));
     if (config_.logRetentionDays > 0) {
@@ -300,6 +370,10 @@ bool ApplicationService::reload(std::string& error) {
         config_.scanStartAddress = loaded.scanStartAddress;
         config_.scanEndAddress = loaded.scanEndAddress;
         config_.scanClockHz = loaded.scanClockHz;
+        config_.buildTimestamp = loaded.buildTimestamp;
+        config_.buildNumber = loaded.buildNumber;
+        config_.betaBuild = loaded.betaBuild;
+        config_.transferTimeoutMs = loaded.transferTimeoutMs;
         config_.logRetentionDays = loaded.logRetentionDays;
         deviceCount = config_.devices.size();
         enabled = static_cast<size_t>(std::count_if(
@@ -376,7 +450,7 @@ bool ApplicationService::readDevice(size_t deviceIndex, std::string& result, std
     AppLockGuard hardwareLock(hardwareMutex_);
     DeviceHandle handle(api_);
     if (!openDevice(device, *handle.address(), error)) return false;
-    Bus bus(api_, handle.get());
+    Bus bus(api_, handle.get(), config_.transferTimeoutMs);
     if (!bus.setClock(device.clock)) {
         error = "Failed to set bus clock for " + device.name;
         return false;
@@ -411,7 +485,7 @@ bool ApplicationService::executeDeviceAction(size_t deviceIndex, const std::stri
     AppLockGuard hardwareLock(hardwareMutex_);
     DeviceHandle handle(api_);
     if (!openDevice(device, *handle.address(), error)) return false;
-    Bus bus(api_, handle.get());
+    Bus bus(api_, handle.get(), config_.transferTimeoutMs);
     if (!bus.setClock(device.clock)) {
         error = "Failed to set bus clock for " + device.name;
         return false;
@@ -423,6 +497,76 @@ bool ApplicationService::executeDeviceAction(size_t deviceIndex, const std::stri
     return succeeded;
 }
 
+bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerAddress,
+                                      BYTE& value, std::string& error) {
+    error.clear();
+    if (!initialized_) { error = "Application service is not initialized"; return false; }
+    const AppConfig config = this->config();
+    if (deviceAddress < 0x08 || deviceAddress > 0x77 || registerAddress > 0xFF) {
+        error = "Device address must be 0x08..0x77 and register address must be 0x00..0xFF";
+        return false;
+    }
+    AppLockGuard hardwareLock(hardwareMutex_);
+    if (config.scanAdapterIndex >= adapterCount_) {
+        error = "No CP2112 adapter is connected at the configured adapter index";
+        return false;
+    }
+    DeviceHandle handle(api_);
+    const Status status = api_.open(handle.address(), config.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID);
+    if (status != 0 || !handle.get()) {
+        error = "Could not open adapter for direct read; status=" + std::to_string(status);
+        return false;
+    }
+    Bus bus(api_, handle.get(), config.transferTimeoutMs);
+    if (!bus.setClock(config.scanClockHz)) {
+        error = "Failed to set bus clock for direct read";
+        return false;
+    }
+    std::vector<BYTE> data;
+    if (!bus.read(deviceAddress, registerAddress, 1, 1, data) || data.empty()) {
+        error = "Read failed at device " + hex(deviceAddress) + ", register " + hex(registerAddress);
+        return false;
+    }
+    value = data.front();
+    if (logger_) logger_->audit("Direct register read device=" + hex(deviceAddress) +
+                               " register=" + hex(registerAddress) + " value=" + hex(value));
+    return true;
+}
+
+bool ApplicationService::writeRegister(unsigned deviceAddress, unsigned registerAddress,
+                                       BYTE value, std::string& error) {
+    error.clear();
+    if (!initialized_) { error = "Application service is not initialized"; return false; }
+    const AppConfig config = this->config();
+    if (deviceAddress < 0x08 || deviceAddress > 0x77 || registerAddress > 0xFF) {
+        error = "Device address must be 0x08..0x77 and register address must be 0x00..0xFF";
+        return false;
+    }
+    AppLockGuard hardwareLock(hardwareMutex_);
+    if (config.scanAdapterIndex >= adapterCount_) {
+        error = "No CP2112 adapter is connected at the configured adapter index";
+        return false;
+    }
+    DeviceHandle handle(api_);
+    const Status status = api_.open(handle.address(), config.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID);
+    if (status != 0 || !handle.get()) {
+        error = "Could not open adapter for direct write; status=" + std::to_string(status);
+        return false;
+    }
+    Bus bus(api_, handle.get(), config.transferTimeoutMs);
+    if (!bus.setClock(config.scanClockHz)) {
+        error = "Failed to set bus clock for direct write";
+        return false;
+    }
+    if (!bus.writeReg(deviceAddress, static_cast<BYTE>(registerAddress), value)) {
+        error = "Write failed at device " + hex(deviceAddress) + ", register " + hex(registerAddress);
+        return false;
+    }
+    if (logger_) logger_->audit("Direct register write device=" + hex(deviceAddress) +
+                               " register=" + hex(registerAddress) + " value=" + hex(value));
+    return true;
+}
+
 bool ApplicationService::streamDevice(size_t deviceIndex, std::atomic<bool>& stop,
                                       const StreamCallback& callback, std::string& error) {
     error.clear();
@@ -431,7 +575,7 @@ bool ApplicationService::streamDevice(size_t deviceIndex, std::atomic<bool>& sto
     AppLockGuard hardwareLock(hardwareMutex_);
     DeviceHandle handle(api_);
     if (!openDevice(device, *handle.address(), error)) return false;
-    Bus bus(api_, handle.get());
+    Bus bus(api_, handle.get(), config_.transferTimeoutMs);
     if (!bus.setClock(device.clock)) {
         error = "Failed to set bus clock for " + device.name;
         return false;
@@ -467,13 +611,18 @@ bool ApplicationService::streamDevice(size_t deviceIndex, std::atomic<bool>& sto
 }
 
 bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReading>& result,
-                              std::string& error) {
+                              std::string& error, const ScanProgressCallback& progress) {
     error.clear();
     if (!initialized_) { error = "Application service is not initialized"; return false; }
     AppLockGuard hardwareLock(hardwareMutex_);
+    if (adapterCount_ == 0) {
+        error = "No CP2112 adapters are connected; scan skipped.";
+        return false;
+    }
     if (options.adapterIndex >= adapterCount_) { error = "Scan adapter index is out of range"; return false; }
     if (options.startAddress < 0x08 || options.endAddress > 0x77 ||
-        options.startAddress > options.endAddress || options.clockHz < 1 || options.clockHz > 400000) {
+        options.startAddress > options.endAddress || options.clockHz < 1 || options.clockHz > 400000 ||
+        options.transferTimeoutMs < 1) {
         error = "Invalid scan address range or bus clock";
         return false;
     }
@@ -483,7 +632,7 @@ bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReadin
         error = "Could not open adapter for scan; status=" + std::to_string(status);
         return false;
     }
-    Bus bus(api_, handle.get());
+    Bus bus(api_, handle.get(), options.transferTimeoutMs);
     if (!bus.setClock(options.clockHz)) { error = "Failed to set bus clock for scan"; return false; }
 
     if (logger_) {
@@ -492,6 +641,7 @@ bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReadin
     }
     result.clear();
     for (unsigned address = options.startAddress; address <= options.endAddress; ++address) {
+        if (progress) progress(address);
         std::vector<BYTE> data;
         ScanReading reading;
         reading.address = address;

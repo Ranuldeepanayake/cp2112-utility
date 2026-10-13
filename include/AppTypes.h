@@ -1,3 +1,4 @@
+// Defines shared configuration, device, synchronization, timestamp, and logging types.
 #pragma once
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -86,6 +87,7 @@ public:
         auditPath_ = dir_ + "\\audit_" + timestamp(true) + ".log";
         audit_.open(auditPath_, std::ios::app);
     }
+    bool available() const { return audit_.is_open(); }
     const std::string& auditPath() const { return auditPath_; }
     void audit(const std::string& message) {
         AppLockGuard lock(auditMutex_);

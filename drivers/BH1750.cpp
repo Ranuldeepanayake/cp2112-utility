@@ -1,3 +1,4 @@
+// Implements the BH1750 light sensor driver and its supported I2C commands.
 #include "DeviceDriver.h"
 #include <iomanip>
 #include <sstream>

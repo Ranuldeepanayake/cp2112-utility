@@ -1,3 +1,4 @@
+// Provides the interactive console UI for the CP2112 application service.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -53,6 +54,12 @@ bool promptUnsigned(const std::string& prompt, unsigned defaultValue, unsigned& 
     if (!parseUnsigned(input, parsed) || parsed > std::numeric_limits<unsigned>::max()) return false;
     value = static_cast<unsigned>(parsed);
     return true;
+}
+
+std::string versionString(const AppConfig& config) {
+    std::string version = "Build " + config.buildTimestamp + "-" + config.buildNumber;
+    if (config.betaBuild) version += "-beta";
+    return version;
 }
 
 void discardInputLine() {
@@ -261,6 +268,7 @@ void scanBus(ApplicationService& app) {
     options.startAddress = config.scanStartAddress;
     options.endAddress = config.scanEndAddress;
     options.clockHz = config.scanClockHz;
+    options.transferTimeoutMs = config.transferTimeoutMs;
     discardInputLine();
     if (!promptUnsigned("Adapter index [" + std::to_string(options.adapterIndex) + "]: ",
                         options.adapterIndex, options.adapterIndex) ||
@@ -275,10 +283,16 @@ void scanBus(ApplicationService& app) {
     }
     std::vector<ScanReading> readings;
     std::string error;
-    if (!app.scan(options, readings, error)) {
+    const auto reportProgress = [](unsigned address) {
+        std::cout << "Scanning address 7-bit=" << hex(address)
+                  << " (" << address << ")"
+                  << "...\n" << std::flush;
+    };
+    if (!app.scan(options, readings, error, reportProgress)) {
         std::cout << "Scan failed: " << error << "\n";
         return;
     }
+    if (!error.empty()) std::cout << "\n" << error << "\n";
     std::cout << "Read-probe scan (not a guaranteed ACK-only scan):\n";
     for (const ScanReading& reading : readings) {
         std::cout << (reading.readSucceeded ? "[READ OK] " : "[no read] ") << hex(reading.address);
@@ -288,6 +302,48 @@ void scanBus(ApplicationService& app) {
     const size_t hits = static_cast<size_t>(std::count_if(
         readings.begin(), readings.end(), [](const ScanReading& reading) { return reading.readSucceeded; }));
     std::cout << "Scan complete; successful read probes=" << hits << "\n";
+}
+
+void directRegisterCommand(ApplicationService& app) {
+    discardInputLine();
+    unsigned deviceAddress = 0;
+    unsigned registerAddress = 0;
+    if (!promptUnsigned("Device I2C address (0x08..0x77): ", 0, deviceAddress) ||
+        !promptUnsigned("Register address (0x00..0xFF): ", 0, registerAddress)) {
+        std::cout << "Invalid address.\n";
+        return;
+    }
+
+    std::cout << "Command (r=read, w=write): ";
+    std::string command;
+    if (!std::getline(std::cin, command) || command.empty()) {
+        std::cout << "Invalid command.\n";
+        return;
+    }
+    std::string error;
+    if (command == "r" || command == "R") {
+        BYTE value = 0;
+        if (app.readRegister(deviceAddress, registerAddress, value, error)) {
+            std::cout << "Read " << hex(value) << " from device " << hex(deviceAddress)
+                      << ", register " << hex(registerAddress) << ".\n";
+        } else {
+            std::cout << "Direct read failed: " << error << "\n";
+        }
+    } else if (command == "w" || command == "W") {
+        unsigned value = 0;
+        if (!promptUnsigned("Byte value (0x00..0xFF): ", 0, value) || value > 0xFF) {
+            std::cout << "Invalid byte value.\n";
+            return;
+        }
+        if (app.writeRegister(deviceAddress, registerAddress, static_cast<BYTE>(value), error)) {
+            std::cout << "Wrote " << hex(value) << " to device " << hex(deviceAddress)
+                      << ", register " << hex(registerAddress) << ".\n";
+        } else {
+            std::cout << "Direct write failed: " << error << "\n";
+        }
+    } else {
+        std::cout << "Unknown command; use r or w.\n";
+    }
 }
 
 void cleanLogs(ApplicationService& app) {
@@ -328,10 +384,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    std::cout << "Version: " << versionString(app.config()) << "\n";
+
     while (true) {
-        std::cout << "\n========== CP2112 Device Console ==========\n"
+        std::cout << "\n========== CP2112 Device Console " << versionString(app.config()) << " ==========\n"
                   << "1 List configured devices\n2 Select device\n3 Adapter information\n"
-                  << "4 Reload configuration\n5 Scan I2C addresses\n6 Clean old logs\n0 Exit\n> ";
+                  << "4 Reload configuration\n5 Scan I2C addresses\n"
+                  << "6 Direct register read/write\n7 Clean old logs\n0 Exit\n> ";
         int choice;
         if (!(std::cin >> choice)) {
             std::cin.clear();
@@ -365,6 +424,8 @@ int main(int argc, char** argv) {
         } else if (choice == 5) {
             scanBus(app);
         } else if (choice == 6) {
+            directRegisterCommand(app);
+        } else if (choice == 7) {
             cleanLogs(app);
         } else {
             std::cout << "Invalid choice.\n";

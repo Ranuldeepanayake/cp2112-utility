@@ -1,3 +1,4 @@
+// Declares driver factory functions and the configuration-to-driver registry lookup.
 #pragma once
 #include "DeviceDriver.h"
 #include <memory>

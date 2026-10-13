@@ -1,3 +1,4 @@
+// Implements raw motion, temperature, and configuration operations for MPU-6050.
 #include "DeviceDriver.h"
 #include <sstream>
 #include <vector>

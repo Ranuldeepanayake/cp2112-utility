@@ -1,2 +1,5 @@
 /logs/*
 !/logs/.gitkeep
+
+# Locally compiled executables are build outputs and must not be committed.
+*.exe

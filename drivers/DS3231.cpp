@@ -1,3 +1,4 @@
+// Implements date, time, temperature, and control-register operations for DS3231.
 #include "DeviceDriver.h"
 #include <iomanip>
 #include <sstream>

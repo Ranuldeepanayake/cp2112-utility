@@ -172,8 +172,7 @@ New-Item -ItemType Directory -Force bin, logs
 ### 2. Compile and link the main application and all drivers
 
 ```powershell
-g++ -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp `
-drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp -o bin\cp2112_console.exe
+g++ -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp -o bin\cp2112_console.exe
 ```
 
 The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
@@ -186,7 +185,9 @@ If you add a driver, include its source file in this command.
 Get-ChildItem bin
 ```
 
-You should see `cp2112_console.exe` and the two Silicon Labs DLLs. The executable is created by compilation; the DLLs must be copied from the SDK.
+You should see the generated executable, the MinGW runtime DLLs required by that executable, and the two Silicon Labs DLLs. The executable is created by compilation; the Silicon Labs DLLs must be copied from the SDK.
+
+The application creates the configured log directory automatically at startup. It also reports a startup prerequisite warning and stops before hardware access if the configured file, either required Silicon Labs DLL, or the audit log cannot be created.
 
 ## Run the application
 
@@ -195,6 +196,8 @@ From the project root:
 ```powershell
 .\bin\cp2112_console.exe
 ```
+
+Release packages contain both `bin/` and `config/` at the package root, so run the executable from that root directory to use the included `config\devices.ini`.
 
 By default, the program reads `config\devices.ini`.
 
@@ -214,8 +217,9 @@ The main menu provides these options:
 2. **Select device** — choose a configured device and enter its device menu.
 3. **Adapter information** — enumerate the CP2112 adapters detected by the application.
 4. **Reload configuration** — reread device definitions and scan defaults from the configuration file. Changes to `bridge_dll` or `log_dir` still require restarting.
-5. **Scan I²C addresses** — scan the configured address range and bus clock, or enter overrides. Press Enter at a scan prompt to accept its configured default.
-6. **Clean old logs** — interactively delete application logs older than a specified number of days.
+5. **Scan I²C addresses** — scan the configured address range and bus clock, or enter overrides. Progress shows each 7-bit device address in hexadecimal and decimal. Press Enter at a scan prompt to accept its configured default.
+6. **Direct register read/write** — send a one-byte read or write command to a selected I²C device and register address.
+7. **Clean old logs** — interactively delete application logs older than a specified number of days.
 0. **Exit** — close the application.
 
 In a device menu:
@@ -299,12 +303,16 @@ enabled=false
 |---|---|---|
 | `bridge_dll` | Path to Silicon Labs HID-to-SMBus DLL | Default: `bin\SLABHIDtoSMBus.dll` |
 | `log_dir` | Directory for audit and stream logs | Default: `logs` |
+| `build_timestamp` | Build date embedded in the CLI build label and release package name | Default: `00000000`; updated only in CI packages |
+| `build_number` | CI pipeline run number embedded in the CLI build label | Default: `0`; unchanged by local builds |
+| `beta` | Whether the package is a beta build | Default: `false`; updated only in CI packages |
 | `default_refresh_seconds` | Default interval applied to device entries that do not override it | 1–3600; default `2` |
 | `default_log_stream` | Default stream logging choice for device entries | `true` or `false`; default `true` |
 | `scan_adapter_index` | Default CP2112 adapter used for scans; can be overridden at the scan prompt | 0–255; default `0` |
 | `scan_start_address` | Default first 7-bit I²C address for scans | `0x08`–`0x77`; default `0x08` |
 | `scan_end_address` | Default last 7-bit I²C address for scans | `0x08`–`0x77`, must be at least the start address; default `0x77` |
 | `scan_clock_hz` | Default scan bus speed | 1–400000 Hz; default `100000` |
+| `transfer_timeout_ms` | Maximum time allowed for each CP2112 transfer/probe before it is treated as failed; the full configured scan range is still visited | 1–60000 ms; default `500` |
 | `log_retention_days` | Automatically delete timestamped application log files at startup when their last-modified time is at least this many days old; oldest files are deleted first. `0` disables automatic cleanup. | 0–36500; default `30` |
 
 ### Device settings

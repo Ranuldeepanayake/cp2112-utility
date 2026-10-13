@@ -1,3 +1,4 @@
+// Implements the BMP280 pressure and temperature sensor driver.
 #include "DeviceDriver.h"
 #include <sstream>
 #include <vector>

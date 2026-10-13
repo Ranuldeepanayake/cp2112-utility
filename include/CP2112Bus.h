@@ -1,3 +1,4 @@
+// Declares the dynamically loaded CP2112 API wrapper and reusable I2C bus operations.
 #pragma once
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -80,8 +81,10 @@ struct Api {
 class Bus {
     Api& api_;
     Device handle_ = nullptr;
+    DWORD timeoutMs_ = 500;
 public:
-    Bus(Api& api, Device h) : api_(api), handle_(h) {}
+    Bus(Api& api, Device h, unsigned timeoutMs = 500)
+        : api_(api), handle_(h), timeoutMs_(timeoutMs) {}
     bool setClock(DWORD hz) {
         return api_.setConfig(handle_, hz, 0x02, TRUE, 100, 300, TRUE, 2) == 0;
     }
@@ -92,7 +95,8 @@ public:
         if (api_.addressRead(handle_, static_cast<BYTE>(address << 1), static_cast<WORD>(length),
                              static_cast<BYTE>(regBytes), p) != 0) return false;
         out.clear();
-        for (unsigned tries = 0; tries < 64; ++tries) {
+        const DWORD start = GetTickCount();
+        while (GetTickCount() - start < timeoutMs_) {
             BYTE buf[61]{}, got = 0;
             int state = TRANSFER_IDLE;
             if (api_.getReadResponse(handle_, &state, buf, sizeof(buf), &got) != 0) return false;
@@ -111,7 +115,8 @@ public:
         if (length < 1 || length > 512) return false;
         if (api_.readRequest(handle_, static_cast<BYTE>(address << 1), static_cast<WORD>(length)) != 0) return false;
         out.clear();
-        for (unsigned tries = 0; tries < 64; ++tries) {
+        const DWORD start = GetTickCount();
+        while (GetTickCount() - start < timeoutMs_) {
             BYTE buf[61]{}, got = 0; int state = TRANSFER_IDLE;
             if (api_.getReadResponse(handle_, &state, buf, sizeof(buf), &got) != 0) return false;
             if (state == TRANSFER_ERROR) return false;
@@ -129,7 +134,8 @@ public:
         if (bytes.empty() || bytes.size() > 61) return false;
         auto copy = bytes;
         if (api_.writeRequest(handle_, static_cast<BYTE>(address << 1), copy.data(), static_cast<BYTE>(copy.size())) != 0) return false;
-        for (unsigned tries = 0; tries < 64; ++tries) {
+        const DWORD start = GetTickCount();
+        while (GetTickCount() - start < timeoutMs_) {
             if (api_.transferStatusRequest(handle_) != 0) return false;
             int state = TRANSFER_IDLE, detail = 0; WORD retries = 0, transferred = 0;
             if (api_.getTransferStatusResponse(handle_, &state, &detail, &retries, &transferred) != 0) return false;
