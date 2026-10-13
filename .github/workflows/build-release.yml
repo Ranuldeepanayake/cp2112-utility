@@ -155,7 +155,8 @@ jobs:
             $commit = git rev-parse HEAD
           } else {
             git commit -m "ci: update build metadata for $env:BUILD_NUMBER"
-            git -c "http.extraheader=AUTHORIZATION: bearer $env:GITHUB_TOKEN" push origin "HEAD:$env:SOURCE_BRANCH"
+            $repositoryUrl = "https://x-access-token:$env:GITHUB_TOKEN@github.com/$env:GITHUB_REPOSITORY.git"
+            git -c credential.helper= -c core.askPass= push $repositoryUrl "HEAD:$env:SOURCE_BRANCH"
             $commit = git rev-parse HEAD
           }
           "commit=$commit" >> $env:GITHUB_OUTPUT
