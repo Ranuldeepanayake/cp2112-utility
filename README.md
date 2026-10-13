@@ -131,7 +131,7 @@ Check the compiler:
 g++ --version
 ```
 
-If PowerShell reports that `g++` is not recognized, install MinGW-w64 and add its `bin` directory to the Windows `PATH`.
+If PowerShell reports that `g++` is not recognized, install 64-bit MinGW-w64 and add its `bin` directory to the Windows `PATH`.
 
 ### Hardware
 
@@ -155,13 +155,33 @@ bin/
 └── SLABHIDDevice.dll
 ```
 
-The DLLs must match the architecture of the executable: use 64-bit DLLs for a 64-bit build, or 32-bit DLLs for a 32-bit build. Keep the DLL versions compatible with one another and with the SDK.
+The DLLs must match the architecture of the executable. This project requires 64-bit Silicon Labs DLLs, so local builds and the GitHub Actions workflow use the available 64-bit MinGW-w64 compiler and build with `-m64`. The workflow checks the compiler and DLL architectures before packaging; a mismatch is rejected instead of producing a package that fails with Windows error 193.
 
 The source dynamically loads `SLABHIDtoSMBus.dll`. It does not require an MSVC import library for this dynamic-loading approach.
 
 ## Build with MinGW-w64
 
 Run these commands from the **project root** (the directory containing `src/`, `drivers/`, `include/`, and `config/`).
+
+### Recommended: build with Make
+
+Install 64-bit MinGW-w64 and `mingw32-make`, then run:
+
+```powershell
+mingw32-make check-toolchain
+mingw32-make
+```
+
+The Makefile compiles all application and driver sources into `bin\cp2112_console.exe`. It creates `bin/` and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated `.exe` files are ignored by Git.
+
+Other Make targets are:
+
+```powershell
+mingw32-make run       # Build and run using config\devices.ini
+mingw32-make clean     # Remove locally built .exe files from bin\
+```
+
+The `run` target must be launched from the project or release-package root so that `config\devices.ini`, `bin\`, and `logs\` resolve correctly.
 
 ### 1. Create the output directory if needed
 
@@ -172,12 +192,14 @@ New-Item -ItemType Directory -Force bin, logs
 ### 2. Compile and link the main application and all drivers
 
 ```powershell
-g++ -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp -o bin\cp2112_console.exe
+g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp -o bin\cp2112_console.exe
 ```
 
 The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
 
 If you add a driver, include its source file in this command.
+
+The direct command above is equivalent to the Makefile build. If a new driver source file is added, update both the direct command and the `SOURCES` list in `Makefile`.
 
 ### 3. Verify the output
 
@@ -197,7 +219,7 @@ From the project root:
 .\bin\cp2112_console.exe
 ```
 
-Release packages contain both `bin/` and `config/` at the package root, so run the executable from that root directory to use the included `config\devices.ini`.
+Release packages contain both `bin/` and `config/` at the package root. The executable searches the current directory, its parent directory, and the executable/package directories for `config\devices.ini`, so it can be launched from either the package root or directly from `bin/`. Relative `bridge_dll` and `log_dir` paths are resolved from the package root when the config file is inside the standard `config/` directory.
 
 By default, the program reads `config\devices.ini`.
 
@@ -208,6 +230,18 @@ To use a different configuration file:
 ```
 
 Use paths relative to the working directory from which you launch the application unless you update the source to resolve paths relative to the executable.
+
+## GitHub Actions build and release pipeline
+
+The workflow is stored in `.github/workflows/build-release.yml`. It runs for:
+
+- A `develop` to `main` pull request when opened: creates a beta build.
+- An approved `develop` to `main` pull request: creates a production build.
+- A manual dispatch from `develop`: creates a beta build.
+
+The workflow checks for an available 64-bit MinGW-w64 compiler, builds the executable using the artifact name, verifies that the executable and Silicon Labs DLLs are 64-bit, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
+
+After compilation succeeds, CI updates `build_timestamp`, `build_number`, and `beta` in `config\devices.ini`, commits those values back to the source branch, and uses that commit for the release tag. If compilation fails, no metadata commit or release tag is created. The workflow must be present on `main` before pull request approval events can trigger production runs.
 
 ## Main menu and navigation
 
@@ -464,7 +498,7 @@ The driver should use the shared `Bus` abstraction for I²C operations. Do not d
 
 ### `g++` is not recognized
 
-Install MinGW-w64 and add the compiler's `bin` directory to `PATH`. Reopen PowerShell and retry `g++ --version`.
+Install 64-bit MinGW-w64 and add the compiler's `bin` directory to `PATH`. Reopen PowerShell and retry `g++ --version`.
 
 ### Configuration file cannot be opened
 

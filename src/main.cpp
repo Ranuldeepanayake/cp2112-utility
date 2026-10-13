@@ -19,10 +19,12 @@ struct StreamStopState {
     std::atomic<unsigned> references{2};
 };
 
+// Releases the shared stream-stop state after one owner is finished with it.
 void releaseStreamStopState(StreamStopState* state) {
     if (state->references.fetch_sub(1, std::memory_order_acq_rel) == 1) delete state;
 }
 
+// Waits for ENTER on a worker thread so streaming can continue independently.
 unsigned __stdcall waitForStreamStop(void* parameter) {
     auto* state = static_cast<StreamStopState*>(parameter);
     std::string line;
@@ -32,6 +34,7 @@ unsigned __stdcall waitForStreamStop(void* parameter) {
     return 0;
 }
 
+// Parses decimal or 0x-prefixed numeric input without accepting trailing text.
 bool parseUnsigned(const std::string& text, unsigned long& value) {
     try {
         size_t consumed = 0;
@@ -42,6 +45,7 @@ bool parseUnsigned(const std::string& text, unsigned long& value) {
     }
 }
 
+// Reads an optional numeric menu value and applies the supplied default on ENTER.
 bool promptUnsigned(const std::string& prompt, unsigned defaultValue, unsigned& value) {
     std::cout << prompt;
     std::string input;
@@ -56,16 +60,51 @@ bool promptUnsigned(const std::string& prompt, unsigned defaultValue, unsigned& 
     return true;
 }
 
+// Tests whether a path points to a regular file rather than a directory.
+bool fileExists(const std::string& path) {
+    const DWORD attributes = GetFileAttributesA(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+// Returns the directory containing the running executable.
+std::string executableDirectory() {
+    char buffer[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameA(nullptr, buffer, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return {};
+    const std::string executablePath(buffer, length);
+    const size_t separator = executablePath.find_last_of("\\/");
+    return separator == std::string::npos ? std::string{} : executablePath.substr(0, separator);
+}
+
+// Finds the default config file when the program is launched from the root or bin directory.
+std::string defaultConfigPath() {
+    const std::string executableDir = executableDirectory();
+    const std::vector<std::string> candidates = {
+        "config\\devices.ini",
+        "..\\config\\devices.ini",
+        executableDir + "\\config\\devices.ini",
+        executableDir + "\\..\\config\\devices.ini"
+    };
+    for (const std::string& candidate : candidates) {
+        if (!candidate.empty() && fileExists(candidate)) return candidate;
+    }
+    return "config\\devices.ini";
+}
+
+// Formats the embedded CI metadata in the user-facing build label.
 std::string versionString(const AppConfig& config) {
     std::string version = "Build " + config.buildTimestamp + "-" + config.buildNumber;
     if (config.betaBuild) version += "-beta";
     return version;
 }
 
+// Clears the remainder of the current console input line after formatted input.
 void discardInputLine() {
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 }
 
+// Displays CP2112 adapter information obtained through the application service.
 void showAdapters(ApplicationService& app) {
     std::vector<AdapterInformation> adapters;
     std::string error;
@@ -88,6 +127,7 @@ void showAdapters(ApplicationService& app) {
     }
 }
 
+// Starts a device stream and owns the ENTER listener used to stop it.
 void streamDevice(ApplicationService& app, size_t index) {
     const DeviceConfig device = app.config().devices[index];
     std::cout << "Streaming " << device.name << " every " << device.refreshSeconds
@@ -109,6 +149,7 @@ void streamDevice(ApplicationService& app, size_t index) {
     if (!ok) std::cout << "Stream failed: " << error << "\n";
 }
 
+// Presents and executes the actions exposed by the selected device driver.
 void runDriverActions(ApplicationService& app, size_t index) {
     std::string error;
     DriverInformation information;
@@ -169,6 +210,7 @@ void runDriverActions(ApplicationService& app, size_t index) {
     }
 }
 
+// Runs the interactive menu for one configured device.
 void deviceMenu(ApplicationService& app, size_t index) {
     while (true) {
         const DeviceConfig device = app.config().devices[index];
@@ -222,6 +264,7 @@ void deviceMenu(ApplicationService& app, size_t index) {
     }
 }
 
+// Displays the enabled device entries using their configuration order.
 void showDevices(const AppConfig& config, const std::vector<size_t>& indices) {
     std::cout << "\nConfigured devices:\n";
     for (size_t i = 0; i < indices.size(); ++i) {
@@ -232,6 +275,7 @@ void showDevices(const AppConfig& config, const std::vector<size_t>& indices) {
     }
 }
 
+// Lets the user choose an enabled device before entering its device menu.
 void selectDevice(ApplicationService& app) {
     const AppConfig config = app.config();
     std::vector<size_t> indices;
@@ -261,6 +305,7 @@ void selectDevice(ApplicationService& app) {
     }
 }
 
+// Collects scan settings, reports address progress, and displays scan results.
 void scanBus(ApplicationService& app) {
     const AppConfig config = app.config();
     ScanOptions options;
@@ -304,6 +349,7 @@ void scanBus(ApplicationService& app) {
     std::cout << "Scan complete; successful read probes=" << hits << "\n";
 }
 
+// Sends one direct register read or write command selected from the main menu.
 void directRegisterCommand(ApplicationService& app) {
     discardInputLine();
     unsigned deviceAddress = 0;
@@ -346,6 +392,7 @@ void directRegisterCommand(ApplicationService& app) {
     }
 }
 
+// Deletes timestamped application logs older than the user-selected age.
 void cleanLogs(ApplicationService& app) {
     discardInputLine();
     unsigned days = 0;
@@ -368,8 +415,9 @@ void cleanLogs(ApplicationService& app) {
 }
 }
 
+// Initializes the service, displays the main menu, and dispatches user commands.
 int main(int argc, char** argv) {
-    const std::string configPath = argc > 1 ? argv[1] : "config\\devices.ini";
+    const std::string configPath = argc > 1 ? argv[1] : defaultConfigPath();
     ApplicationService app;
     std::string error;
     if (!app.initialize(configPath, error)) {
