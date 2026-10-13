@@ -219,7 +219,7 @@ From the project root:
 .\bin\cp2112_console.exe
 ```
 
-Release packages contain both `bin/` and `config/` at the package root, so run the executable from that root directory to use the included `config\devices.ini`.
+Release packages contain both `bin/` and `config/` at the package root. The executable searches the current directory, its parent directory, and the executable/package directories for `config\devices.ini`, so it can be launched from either the package root or directly from `bin/`. Relative `bridge_dll` and `log_dir` paths are resolved from the config file’s directory.
 
 By default, the program reads `config\devices.ini`.
 

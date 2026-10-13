@@ -1,6 +1,7 @@
 // Maps configured device type names to their compiled-in driver factories.
 #include "DriverRegistry.h"
 
+// Creates the driver implementation selected by the configuration type string.
 std::unique_ptr<Driver> makeDriver(const std::string& type) {
     if (type == "bmp280") return makeBmp280Driver();
     if (type == "mpu6050") return makeMpu6050Driver();

@@ -8,6 +8,7 @@
 #include <sstream>
 
 namespace {
+// Removes surrounding whitespace from configuration tokens.
 std::string trim(std::string value) {
     auto notSpace = [](unsigned char ch) { return !std::isspace(ch); };
     value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
@@ -15,12 +16,14 @@ std::string trim(std::string value) {
     return value;
 }
 
+// Normalizes case for case-insensitive configuration comparisons.
 std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return value;
 }
 
+// Parses decimal or hexadecimal unsigned configuration values.
 bool parseUnsigned(const std::string& text, unsigned long& value) {
     try {
         size_t consumed = 0;
@@ -31,6 +34,7 @@ bool parseUnsigned(const std::string& text, unsigned long& value) {
     }
 }
 
+// Parses the supported textual boolean representations.
 bool parseBool(const std::string& text, bool& value) {
     const std::string normalized = lower(trim(text));
     if (normalized == "true" || normalized == "yes" || normalized == "1" || normalized == "on") {
@@ -44,6 +48,7 @@ bool parseBool(const std::string& text, bool& value) {
     return false;
 }
 
+// Loads and validates the INI-like configuration file and device definitions.
 bool loadConfig(const std::string& path, AppConfig& config, std::string& error) {
     std::ifstream input(path);
     if (!input) {
@@ -164,6 +169,7 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
     return true;
 }
 
+// Retrieves one text property from the dynamically loaded CP2112 API.
 std::string adapterString(Api& api, DWORD index, DWORD option) {
     char buffer[512]{};
     const Status status = api.getString(index, DEFAULT_VID, DEFAULT_PID, buffer, option);
@@ -171,17 +177,44 @@ std::string adapterString(Api& api, DWORD index, DWORD option) {
     return buffer;
 }
 
+// Confirms that a required path exists and is not a directory.
 bool regularFileExists(const std::string& path) {
     const DWORD attributes = GetFileAttributesA(path.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES &&
            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
+// Builds a path to a file located beside another path.
 std::string siblingFile(const std::string& path, const std::string& filename) {
     const size_t separator = path.find_last_of("\\/");
     return separator == std::string::npos ? filename : path.substr(0, separator + 1) + filename;
 }
 
+// Identifies drive-qualified and root-qualified Windows paths.
+bool isAbsolutePath(const std::string& path) {
+    return (path.size() >= 2 && path[1] == ':') ||
+           (!path.empty() && (path[0] == '\\' || path[0] == '/'));
+}
+
+// Converts a path to an absolute Windows path when possible.
+std::string absolutePath(const std::string& path) {
+    char buffer[MAX_PATH]{};
+    const DWORD length = GetFullPathNameA(path.c_str(), MAX_PATH, buffer, nullptr);
+    return length > 0 && length < MAX_PATH ? std::string(buffer, length) : path;
+}
+
+// Returns the directory portion of a path.
+std::string directoryName(const std::string& path) {
+    const size_t separator = path.find_last_of("\\/");
+    return separator == std::string::npos ? std::string{} : path.substr(0, separator);
+}
+
+// Resolves config-relative paths against the directory containing the config file.
+std::string resolveRelativePath(const std::string& path, const std::string& baseDirectory) {
+    return isAbsolutePath(path) ? path : absolutePath(baseDirectory + "\\" + path);
+}
+
+// Creates a directory and any missing parent directories using Windows APIs.
 bool ensureDirectory(const std::string& path, std::string& error) {
     if (path.empty()) {
         error = "Log directory path is empty.";
@@ -213,6 +246,7 @@ bool ensureDirectory(const std::string& path, std::string& error) {
     return false;
 }
 
+// Recognizes the timestamped audit and stream log naming patterns.
 bool isTimestampedLog(const std::string& name) {
     const std::string filename = lower(name);
     const bool audit = filename.size() == 6 + 15 + 4 &&
@@ -234,6 +268,7 @@ bool isTimestampedLog(const std::string& name) {
     return true;
 }
 
+// Removes eligible old logs while preserving the active audit log.
 LogCleanupResult removeOldLogs(const std::string& directory, unsigned days,
                                const std::string& activeAuditPath) {
     struct Candidate {
@@ -300,11 +335,15 @@ private:
 ApplicationService::ApplicationService() = default;
 ApplicationService::~ApplicationService() = default;
 
+// Loads startup configuration, creates logging, validates prerequisites, and opens the CP2112 API.
 bool ApplicationService::initialize(const std::string& configPath, std::string& error) {
     error.clear();
-    configPath_ = configPath;
+    configPath_ = absolutePath(configPath);
     AppConfig loaded;
     if (!loadConfig(configPath_, loaded, error)) return false;
+    const std::string configDirectory = directoryName(configPath_);
+    loaded.bridgeDll = resolveRelativePath(loaded.bridgeDll, configDirectory);
+    loaded.logDir = resolveRelativePath(loaded.logDir, configDirectory);
     config_ = std::move(loaded);
 
     std::string logDirectoryError;
@@ -345,11 +384,13 @@ bool ApplicationService::initialize(const std::string& configPath, std::string& 
     return true;
 }
 
+// Returns a thread-safe snapshot of the current application configuration.
 AppConfig ApplicationService::config() const {
     AppLockGuard lock(configMutex_);
     return config_;
 }
 
+// Reloads editable configuration values while retaining the active hardware session.
 bool ApplicationService::reload(std::string& error) {
     error.clear();
     AppConfig loaded;
@@ -357,6 +398,9 @@ bool ApplicationService::reload(std::string& error) {
         if (logger_) logger_->audit("Configuration reload failed: " + error);
         return false;
     }
+    const std::string configDirectory = directoryName(configPath_);
+    loaded.bridgeDll = resolveRelativePath(loaded.bridgeDll, configDirectory);
+    loaded.logDir = resolveRelativePath(loaded.logDir, configDirectory);
     bool restartRequired = false;
     size_t enabled = 0;
     size_t deviceCount = 0;
@@ -390,6 +434,7 @@ bool ApplicationService::reload(std::string& error) {
     return true;
 }
 
+// Enumerates connected CP2112 adapters and collects their descriptive properties.
 bool ApplicationService::adapters(std::vector<AdapterInformation>& result, std::string& error) {
     error.clear();
     if (!initialized_) { error = "Application service is not initialized"; return false; }
@@ -418,6 +463,7 @@ bool ApplicationService::adapters(std::vector<AdapterInformation>& result, std::
     return true;
 }
 
+// Retrieves and validates an enabled configured device by index.
 bool ApplicationService::getDevice(size_t deviceIndex, DeviceConfig& device,
                                    std::string& error) const {
     if (!initialized_) { error = "Application service is not initialized"; return false; }
@@ -428,6 +474,7 @@ bool ApplicationService::getDevice(size_t deviceIndex, DeviceConfig& device,
     return true;
 }
 
+// Opens the configured adapter for a device operation.
 bool ApplicationService::openDevice(const DeviceConfig& config, Device& handle,
                                     std::string& error) {
     if (config.adapterIndex >= adapterCount_) {
@@ -443,6 +490,7 @@ bool ApplicationService::openDevice(const DeviceConfig& config, Device& handle,
     return true;
 }
 
+// Performs one driver-defined read for a configured device.
 bool ApplicationService::readDevice(size_t deviceIndex, std::string& result, std::string& error) {
     error.clear();
     DeviceConfig device;
@@ -462,6 +510,7 @@ bool ApplicationService::readDevice(size_t deviceIndex, std::string& result, std
     return true;
 }
 
+// Returns the metadata and actions exposed by a configured device driver.
 bool ApplicationService::driverInformation(size_t deviceIndex, DriverInformation& result,
                                            std::string& error) const {
     error.clear();
@@ -475,6 +524,7 @@ bool ApplicationService::driverInformation(size_t deviceIndex, DriverInformation
     return true;
 }
 
+// Executes a driver-defined action after opening and configuring the bus.
 bool ApplicationService::executeDeviceAction(size_t deviceIndex, const std::string& action,
                                              const std::vector<std::string>& parameters,
                                              std::string& result, std::string& error) {
@@ -497,6 +547,7 @@ bool ApplicationService::executeDeviceAction(size_t deviceIndex, const std::stri
     return succeeded;
 }
 
+// Reads one byte from a register using the scan adapter and configured timeout.
 bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerAddress,
                                       BYTE& value, std::string& error) {
     error.clear();
@@ -533,6 +584,7 @@ bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerA
     return true;
 }
 
+// Writes one byte to a register using the scan adapter and configured timeout.
 bool ApplicationService::writeRegister(unsigned deviceAddress, unsigned registerAddress,
                                        BYTE value, std::string& error) {
     error.clear();
@@ -567,6 +619,7 @@ bool ApplicationService::writeRegister(unsigned deviceAddress, unsigned register
     return true;
 }
 
+// Streams driver readings until the caller's stop flag is set.
 bool ApplicationService::streamDevice(size_t deviceIndex, std::atomic<bool>& stop,
                                       const StreamCallback& callback, std::string& error) {
     error.clear();
@@ -610,6 +663,7 @@ bool ApplicationService::streamDevice(size_t deviceIndex, std::atomic<bool>& sto
     return true;
 }
 
+// Probes each configured I2C address with bounded transfers and optional progress reporting.
 bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReading>& result,
                               std::string& error, const ScanProgressCallback& progress) {
     error.clear();
@@ -655,6 +709,7 @@ bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReadin
     return true;
 }
 
+// Applies temporary refresh and logging settings to one configured device.
 bool ApplicationService::updateRuntimeDevice(size_t deviceIndex, unsigned refreshSeconds,
                                              bool logStream, std::string& error) {
     error.clear();
@@ -672,6 +727,7 @@ bool ApplicationService::updateRuntimeDevice(size_t deviceIndex, unsigned refres
     return true;
 }
 
+// Deletes old logs through the service logger and records the cleanup result.
 bool ApplicationService::cleanLogs(unsigned days, LogCleanupResult& result, std::string& error) {
     error.clear();
     if (!initialized_ || !logger_) { error = "Application service is not initialized"; return false; }
