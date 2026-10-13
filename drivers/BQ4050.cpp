@@ -1,3 +1,4 @@
+// Implements Smart Battery and diagnostic operations for the TI BQ4050 driver.
 #include "DeviceDriver.h"
 #include <iomanip>
 #include <sstream>

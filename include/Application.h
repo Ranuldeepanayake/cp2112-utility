@@ -1,3 +1,4 @@
+// Declares the UI-independent application service used by the console frontend.
 #pragma once
 #include "AppTypes.h"
 #include "CP2112Bus.h"
@@ -11,12 +12,16 @@
 struct AppConfig {
     std::string bridgeDll = "SLABHIDtoSMBus.dll";
     std::string logDir = "logs";
+    std::string buildTimestamp = "00000000";
+    std::string buildNumber = "0";
+    bool betaBuild = false;
     unsigned defaultRefreshSeconds = 2;
     bool defaultLogStream = true;
     unsigned scanAdapterIndex = 0;
     unsigned scanStartAddress = 0x08;
     unsigned scanEndAddress = 0x77;
     unsigned scanClockHz = 100000;
+    unsigned transferTimeoutMs = 500;
     unsigned logRetentionDays = 30;
     std::vector<DeviceConfig> devices;
 };
@@ -39,6 +44,7 @@ struct ScanOptions {
     unsigned startAddress = 0x08;
     unsigned endAddress = 0x77;
     unsigned clockHz = 100000;
+    unsigned transferTimeoutMs = 500;
 };
 
 struct ScanReading {
@@ -61,6 +67,7 @@ struct LogCleanupResult {
 class ApplicationService {
 public:
     using StreamCallback = std::function<void(const std::string&, const std::string&)>;
+    using ScanProgressCallback = std::function<void(unsigned)>;
 
     ApplicationService();
     ~ApplicationService();
@@ -77,10 +84,14 @@ public:
     bool executeDeviceAction(size_t deviceIndex, const std::string& action,
                              const std::vector<std::string>& parameters,
                              std::string& result, std::string& error);
+    bool readRegister(unsigned deviceAddress, unsigned registerAddress,
+                      BYTE& value, std::string& error);
+    bool writeRegister(unsigned deviceAddress, unsigned registerAddress,
+                       BYTE value, std::string& error);
     bool streamDevice(size_t deviceIndex, std::atomic<bool>& stop,
                       const StreamCallback& callback, std::string& error);
     bool scan(const ScanOptions& options, std::vector<ScanReading>& result,
-              std::string& error);
+              std::string& error, const ScanProgressCallback& progress = {});
     bool updateRuntimeDevice(size_t deviceIndex, unsigned refreshSeconds,
                              bool logStream, std::string& error);
     bool cleanLogs(unsigned days, LogCleanupResult& result, std::string& error);

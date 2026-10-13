@@ -27,10 +27,12 @@ jobs:
       (github.event_name == 'pull_request' &&
        github.event.action == 'opened' &&
        github.event.pull_request.head.ref == 'develop' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.base.ref == 'main') ||
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
        github.event.pull_request.head.ref == 'develop' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.base.ref == 'main')
     runs-on: windows-latest
 
@@ -55,7 +57,26 @@ jobs:
           $date = Get-Date -Format 'ddMMyyyy'
           $suffix = if ($env:EVENT_NAME -eq 'pull_request_review' -and '${{ github.event.review.state }}' -eq 'approved') { '' } else { '-beta' }
           $name = "cp2112_console-$date-$env:GITHUB_RUN_NUMBER$suffix"
+          $beta = if ($suffix) { 'true' } else { 'false' }
           "name=$name" >> $env:GITHUB_OUTPUT
+          "build_timestamp=$date" >> $env:GITHUB_OUTPUT
+          "build_number=$env:GITHUB_RUN_NUMBER" >> $env:GITHUB_OUTPUT
+          "beta=$beta" >> $env:GITHUB_OUTPUT
+
+      # Action: prepare CI build metadata in the working copy for this build.
+      - name: Prepare packaged build metadata
+        shell: pwsh
+        env:
+          BUILD_TIMESTAMP: ${{ steps.package.outputs.build_timestamp }}
+          BUILD_NUMBER: ${{ steps.package.outputs.build_number }}
+          BETA: ${{ steps.package.outputs.beta }}
+        run: |
+          $configPath = 'config\devices.ini'
+          $config = Get-Content $configPath -Raw
+          $config = [regex]::Replace($config, '(?m)^build_timestamp=.*$', "build_timestamp=$env:BUILD_TIMESTAMP")
+          $config = [regex]::Replace($config, '(?m)^build_number=.*$', "build_number=$env:BUILD_NUMBER")
+          $config = [regex]::Replace($config, '(?m)^beta=.*$', "beta=$env:BETA")
+          Set-Content -Path $configPath -Value $config -Encoding utf8
 
       # Action: verify that the README-required MinGW-w64 C++ toolchain exists.
       - name: Check MinGW-w64 toolchain
@@ -85,6 +106,60 @@ jobs:
             drivers\DS3231.cpp drivers\BQ4050.cpp `
             -o "bin\$env:ARTIFACT_NAME.exe"
 
+      # Action: bundle the MinGW runtime DLLs required by the compiled executable.
+      - name: Bundle MinGW runtime DLLs
+        shell: pwsh
+        env:
+          ARTIFACT_NAME: ${{ steps.package.outputs.name }}
+        run: |
+          $toolchainBin = Split-Path (Get-Command g++).Source
+          $objdump = Join-Path $toolchainBin 'objdump.exe'
+          $executable = Join-Path $PWD "bin\$env:ARTIFACT_NAME.exe"
+
+          if (-not (Test-Path $objdump)) {
+            throw "objdump.exe was not found beside g++ at $toolchainBin"
+          }
+
+          $dependencies = & $objdump -p $executable |
+            Select-String 'DLL Name:' |
+            ForEach-Object { ($_ -split 'DLL Name:\s*', 2)[1].Trim() } |
+            Sort-Object -Unique
+
+          $bundled = @()
+          foreach ($dependency in $dependencies) {
+            $runtimeDll = Join-Path $toolchainBin $dependency
+            if (Test-Path $runtimeDll) {
+              Copy-Item $runtimeDll bin -Force
+              $bundled += $dependency
+            }
+          }
+
+          if (-not ($bundled | Where-Object { $_ -match '^(libgcc|libstdc\+\+|libwinpthread|mingw)' })) {
+            throw 'No MinGW runtime DLL was bundled; the release may fail on machines without MinGW installed.'
+          }
+          Write-Host "Bundled runtime DLLs: $($bundled -join ', ')"
+
+      # Action: commit and push metadata only after compilation succeeds.
+      - name: Commit build metadata
+        id: metadata
+        shell: pwsh
+        env:
+          BUILD_NUMBER: ${{ steps.package.outputs.build_number }}
+          SOURCE_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.pull_request.head.ref }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add config\devices.ini
+          if (git diff --cached --quiet) {
+            $commit = git rev-parse HEAD
+          } else {
+            git commit -m "ci: update build metadata for $env:BUILD_NUMBER"
+            git -c "http.extraheader=AUTHORIZATION: bearer $env:GITHUB_TOKEN" push origin "HEAD:$env:SOURCE_BRANCH"
+            $commit = git rev-parse HEAD
+          }
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+
       # Action: package the complete bin directory as the downloadable release asset.
       - name: Package bin directory
         id: archive
@@ -93,7 +168,7 @@ jobs:
           ARTIFACT_NAME: ${{ steps.package.outputs.name }}
         run: |
           $package = "$env:ARTIFACT_NAME.zip"
-          Compress-Archive -Path bin -DestinationPath $package -Force
+          Compress-Archive -Path bin, config -DestinationPath $package -Force
           "package=$package" >> $env:GITHUB_OUTPUT
 
       # Action: upload the package as a workflow artifact.
@@ -111,7 +186,7 @@ jobs:
           RELEASE_NAME: ${{ steps.package.outputs.name }}
           PACKAGE_PATH: ${{ steps.archive.outputs.package }}
           IS_BETA: ${{ github.event_name != 'pull_request_review' }}
-          TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.head.sha }}
+          TARGET_SHA: ${{ steps.metadata.outputs.commit }}
         shell: pwsh
         run: |
           $args = @(

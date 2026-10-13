@@ -1,3 +1,4 @@
+// Maps configured device type names to their compiled-in driver factories.
 #include "DriverRegistry.h"
 
 std::unique_ptr<Driver> makeDriver(const std::string& type) {

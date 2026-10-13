@@ -1,3 +1,4 @@
+// Defines the common interface implemented by each compiled-in device driver.
 #pragma once
 #include "AppTypes.h"
 #include "CP2112Bus.h"
