@@ -172,6 +172,8 @@ mingw32-make check-toolchain
 mingw32-make
 ```
 
+For an exact match with CI, use the pinned WinLibs archive `x86_64-16.2.0-release-mcf-seh-ucrt-rt_v14-rev1.7z` and put its `mingw64\bin` directory first on `PATH`. Its SHA-256 is `f4f9a32681afd5862bdc060dfcf51169e3fc7b4854c1d6d304ba249a51f1df2a`.
+
 The Makefile compiles all application and driver sources into `bin\cp2112_console.exe`. It creates `bin/` and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated `.exe` files are ignored by Git.
 
 Other Make targets are:
@@ -239,9 +241,9 @@ The workflow is stored in `.github/workflows/build-release.yml`. It runs for:
 - A merged `develop` to `main` pull request (`github.event.pull_request.merged == true`): creates a production build.
 - A manual dispatch from `develop`: creates a beta build.
 
-The workflow checks for an available 64-bit MinGW-w64 compiler, builds the executable using the artifact name, verifies that the executable and Silicon Labs DLLs are 64-bit, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. Opening a `develop` to `main` pull request creates a beta package; closing it as merged (`github.event.pull_request.merged == true`) creates the production package. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
+The workflow checks for an available 64-bit MinGW-w64 compiler, builds the CLI executable as `cp2112_console-ddmmyyyyhhmm-buildnumber-state.exe`, verifies that the executable and Silicon Labs DLLs are 64-bit, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. The ZIP/release name is `cp2112_utility-ddmmyyyyhhmm-buildnumber-state.zip`. Opening a `develop` to `main` pull request creates a `beta` package; closing it as merged (`github.event.pull_request.merged == true`) creates a `prod` package. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
 
-After compilation succeeds, CI updates `build_timestamp`, `build_number`, and `beta` in `config\devices.ini`, commits those values back to the source branch, and uses that commit for the release tag. If compilation fails, no metadata commit or release tag is created. The workflow must be present on `main` before pull request approval events can trigger production runs.
+After compilation succeeds, CI updates `build_timestamp` (`ddMMyyyyHHmm`), `build_number`, and `beta` in `config\devices.ini`, commits those values back to the source branch, and uses that commit for the release tag. If compilation fails, no metadata commit or release tag is created. The workflow must be present on `main` before merged pull request events can trigger production runs.
 
 ## Main menu and navigation
 
@@ -337,7 +339,7 @@ enabled=false
 |---|---|---|
 | `bridge_dll` | Path to Silicon Labs HID-to-SMBus DLL | Default: `bin\SLABHIDtoSMBus.dll` |
 | `log_dir` | Directory for audit and stream logs | Default: `logs` |
-| `build_timestamp` | Build date embedded in the CLI build label and release package name | Default: `00000000`; updated only in CI packages |
+| `build_timestamp` | Build timestamp (`ddMMyyyyHHmm`) embedded in the CLI build label and release package name | Default: `000000000000`; updated only in CI packages |
 | `build_number` | CI pipeline run number embedded in the CLI build label | Default: `0`; unchanged by local builds |
 | `beta` | Whether the package is a beta build | Default: `false`; updated only in CI packages |
 | `default_refresh_seconds` | Default interval applied to device entries that do not override it | 1–3600; default `2` |
