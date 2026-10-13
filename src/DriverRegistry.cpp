@@ -1,0 +1,10 @@
+#include "DriverRegistry.h"
+
+std::unique_ptr<Driver> makeDriver(const std::string& type) {
+    if (type == "bmp280") return makeBmp280Driver();
+    if (type == "mpu6050") return makeMpu6050Driver();
+    if (type == "bh1750") return makeBh1750Driver();
+    if (type == "ds3231") return makeDs3231Driver();
+    if (type == "bq4050") return makeBq4050Driver();
+    return nullptr;
+}
