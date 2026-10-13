@@ -172,7 +172,9 @@ mingw32-make check-toolchain
 mingw32-make
 ```
 
-For an exact match with CI, use the pinned WinLibs archive `x86_64-16.2.0-release-mcf-seh-ucrt-rt_v14-rev1.7z` and put its `mingw64\bin` directory first on `PATH`. Its SHA-256 is `f4f9a32681afd5862bdc060dfcf51169e3fc7b4854c1d6d304ba249a51f1df2a`.
+For an exact match with CI, use the pinned WinLibs archive `x86_64-16.2.0-release-mcf-seh-ucrt-rt_v14-rev1.7z` from the [MinGW-builds-binaries releases](https://github.com/niXman/mingw-builds-binaries/releases) and put its `mingw64\bin` directory first on `PATH`. Its SHA-256 is `f4f9a32681afd5862bdc060dfcf51169e3fc7b4854c1d6d304ba249a51f1df2a`.
+
+`mingw32-make` is the traditional Windows executable name for MinGW's GNU Make program. It does not mean that the build is 32-bit; the compiler target is controlled by `g++`, and this project explicitly uses the 64-bit `x86_64-w64-mingw32` compiler with `-m64`. There is normally no separate `mingw64-make` executable.
 
 The Makefile compiles all application and driver sources into `bin\cp2112_console.exe`. It creates `bin/` and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated `.exe` files are ignored by Git.
 
@@ -241,7 +243,7 @@ The workflow is stored in `.github/workflows/build-release.yml`. It runs for:
 - A merged `develop` to `main` pull request (`github.event.pull_request.merged == true`): creates a production build.
 - A manual dispatch from `develop`: creates a beta build.
 
-The workflow checks for an available 64-bit MinGW-w64 compiler, builds the CLI executable as `cp2112_console-ddmmyyyyhhmm-buildnumber-state.exe`, verifies that the executable and Silicon Labs DLLs are 64-bit, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. The ZIP/release name is `cp2112_utility-ddmmyyyyhhmm-buildnumber-state.zip`. Opening a `develop` to `main` pull request creates a `beta` package; closing it as merged (`github.event.pull_request.merged == true`) creates a `prod` package. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
+The workflow checks for an available 64-bit MinGW-w64 compiler, builds the CLI executable as `cp2112_console.exe`, verifies that the executable and Silicon Labs DLLs are 64-bit, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. The ZIP/release name is `cp2112_utility-ddmmyyyyhhmm-buildnumber-beta.zip` for beta builds or `cp2112_utility-ddmmyyyyhhmm-buildnumber.zip` for merged releases. Opening a `develop` to `main` pull request creates a beta package; closing it as merged (`github.event.pull_request.merged == true`) creates the release package without a state suffix. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
 
 After compilation succeeds, CI updates `build_timestamp` (`ddMMyyyyHHmm`), `build_number`, and `beta` in `config\devices.ini`, commits those values back to the source branch, and uses that commit for the release tag. If compilation fails, no metadata commit or release tag is created. The workflow must be present on `main` before merged pull request events can trigger production runs.
 
