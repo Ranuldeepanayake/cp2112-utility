@@ -7,15 +7,29 @@ struct Mpu6050Driver : Driver {
     std::string title() const override { return "MPU-6050 accelerometer/gyroscope"; }
     std::string capabilities() const override { return "Read accelerometer, temperature and gyroscope raw values; write power/gyro/accel config registers"; }
 
-    std::string readStream(Bus& bus, const DeviceConfig& d) override {
+    bool readResult(Bus& bus, const DeviceConfig& d, DeviceResult& result) override {
         std::vector<BYTE> who, bytes;
-        if (!bus.read(d.address, 0x75, 1, 1, who) || !bus.read(d.address, 0x3B, 1, 14, bytes)) return "ERROR: I2C read failed";
-        std::ostringstream output;
-        output << "who_am_i=" << hex(who[0]) << ", accel_xyz_raw=("
-               << signed16(bytes[0], bytes[1]) << "," << signed16(bytes[2], bytes[3]) << "," << signed16(bytes[4], bytes[5])
-               << "), temp_raw=" << signed16(bytes[6], bytes[7]) << ", gyro_xyz_raw=("
-               << signed16(bytes[8], bytes[9]) << "," << signed16(bytes[10], bytes[11]) << "," << signed16(bytes[12], bytes[13]) << ")";
-        return output.str();
+        if (!bus.read(d.address, 0x75, 1, 1, who) || !bus.read(d.address, 0x3B, 1, 14, bytes)) {
+            result.error = "I2C read failed";
+            return false;
+        }
+        result.succeeded = true;
+        result.add("who_am_i", static_cast<uint64_t>(who[0]), {}, static_cast<uint64_t>(who[0]));
+        result.add("accel_x_raw", static_cast<int64_t>(signed16(bytes[0], bytes[1])), {},
+                   static_cast<int64_t>(signed16(bytes[0], bytes[1])));
+        result.add("accel_y_raw", static_cast<int64_t>(signed16(bytes[2], bytes[3])), {},
+                   static_cast<int64_t>(signed16(bytes[2], bytes[3])));
+        result.add("accel_z_raw", static_cast<int64_t>(signed16(bytes[4], bytes[5])), {},
+                   static_cast<int64_t>(signed16(bytes[4], bytes[5])));
+        result.add("temperature_raw", static_cast<int64_t>(signed16(bytes[6], bytes[7])), {},
+                   static_cast<int64_t>(signed16(bytes[6], bytes[7])));
+        result.add("gyro_x_raw", static_cast<int64_t>(signed16(bytes[8], bytes[9])), {},
+                   static_cast<int64_t>(signed16(bytes[8], bytes[9])));
+        result.add("gyro_y_raw", static_cast<int64_t>(signed16(bytes[10], bytes[11])), {},
+                   static_cast<int64_t>(signed16(bytes[10], bytes[11])));
+        result.add("gyro_z_raw", static_cast<int64_t>(signed16(bytes[12], bytes[13])), {},
+                   static_cast<int64_t>(signed16(bytes[12], bytes[13])));
+        return true;
     }
 
     std::vector<DriverAction> actions() const override {

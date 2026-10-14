@@ -50,6 +50,8 @@ The application separates the CLI and configuration handling from the device-spe
 
 `include/Application.h` and `src/Application.cpp` provide the UI-independent `ApplicationService`. It owns configuration loading/reloading, adapter enumeration and opening, device reads and actions, streaming callbacks, I²C scans, runtime device settings, and log cleanup. A future frontend can call these operations without using console menus or relying on `std::cin`/`std::cout`.
 
+Device reads are available through `ApplicationService::readDeviceResult()`, which returns a structured `DeviceResult` containing typed `DeviceReading` fields with keys, raw values, converted values, and units. Structured streaming is available through `streamDeviceStructured()`. The existing `readDevice()` and `streamDevice()` methods remain CLI-compatible renderers over those structured results; GUI code should use the structured methods instead of parsing display strings.
+
 ### Device drivers
 
 Each driver is a separate C++ translation unit:
@@ -259,11 +261,12 @@ The main menu provides these options:
 
 1. **List configured devices** — display enabled device entries and their type, address, clock, refresh interval, and logging setting.
 2. **Select device** — choose a configured device and enter its device menu.
-3. **Adapter information** — enumerate the CP2112 adapters detected by the application.
+3. **Adapter information** — enumerate detected adapters and read their current part number, part version, USB VID/PID, USB release, manufacturer/product/serial strings, SMBus library version, HID library version, stored USB configuration (VID/PID, release, power, and power mode), configuration lock bits, and active SMBus settings (bus speed, target address, timeouts, retries, automatic read response, and SCL-low timeout). This menu is read-only; it does not change persistent USB configuration.
 4. **Reload configuration** — reread device definitions and scan defaults from the configuration file. Changes to `bridge_dll` or `log_dir` still require restarting.
-5. **Scan I²C addresses** — scan the configured address range and bus clock, or enter overrides. Progress shows each 7-bit device address in hexadecimal and decimal. Press Enter at a scan prompt to accept its configured default.
+5. **Scan I²C addresses** — scan the configured address range and bus clock, or enter overrides. Progress shows each 7-bit device address in hexadecimal and decimal. Press Enter at a scan prompt to accept its configured default. Press `Q` or `Esc` during a scan to cancel the active CP2112 transfer; the final output includes raw API status, transfer state, detailed status, retries, byte count, timeout, and cancellation fields.
 6. **Direct register read/write** — send a one-byte read or write command to a selected I²C device and register address.
 7. **Clean old logs** — interactively delete application logs older than a specified number of days.
+8. **Settings** — update validated general and device-specific settings and persist them to `config/devices.ini`.
 0. **Exit** — close the application.
 
 In a device menu:
@@ -275,7 +278,7 @@ In a device menu:
 5. **Toggle stream logging** — enable or disable data logging for the current run.
 0. **Back to device list** — return to the main device list.
 
-Runtime changes to refresh interval and stream logging are not saved back to `devices.ini`. Edit the configuration file and select **Reload configuration** to apply device definitions, including enabled/disabled status, and scan defaults. Reloading replaces runtime device edits with the values from the file. Changes to `bridge_dll` and `log_dir` require restarting.
+The frontend-neutral settings API persists validated general and device settings back to `devices.ini` while preserving unrelated comments and sections. The CLI exposes this through **Settings** as a proof of concept. Select **Reload configuration** after external edits; changes to `bridge_dll` and `log_dir` still require restarting.
 
 ## Configuration reference
 

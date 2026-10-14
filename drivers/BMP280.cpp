@@ -10,11 +10,14 @@ struct Bmp280Driver : Driver {
     std::string title() const override { return "BMP280 pressure/temperature"; }
     std::string capabilities() const override { return "Read raw and compensated temperature/pressure; write control/config registers"; }
 
-    std::string readStream(Bus& bus, const DeviceConfig& d) override {
+    bool readResult(Bus& bus, const DeviceConfig& d, DeviceResult& result) override {
         std::vector<BYTE> id, calibration, raw;
         if (!bus.read(d.address, 0xD0, 1, 1, id) ||
             !bus.read(d.address, 0x88, 1, 24, calibration) ||
-            !bus.read(d.address, 0xF7, 1, 6, raw)) return "ERROR: I2C read failed";
+            !bus.read(d.address, 0xF7, 1, 6, raw)) {
+            result.error = "I2C read failed";
+            return false;
+        }
 
         const auto u16 = [&calibration](size_t offset) -> uint16_t {
             return static_cast<uint16_t>(calibration[offset] |
@@ -43,22 +46,22 @@ struct Bmp280Driver : Driver {
         pressureVar2 = pressureVar2 / 4.0 + s16(12) * 65536.0;
         pressureVar1 = (s16(10) * pressureVar1 * pressureVar1 / 524288.0 + s16(8) * pressureVar1) / 524288.0;
         pressureVar1 = (1.0 + pressureVar1 / 32768.0) * u16(6);
-        if (std::abs(pressureVar1) < 1e-12) return "ERROR: invalid BMP280 pressure calibration";
+        if (std::abs(pressureVar1) < 1e-12) {
+            result.error = "invalid BMP280 pressure calibration";
+            return false;
+        }
         double pressurePa = 1048576.0 - rawPressure;
         pressurePa = (pressurePa - pressureVar2 / 4096.0) * 6250.0 / pressureVar1;
         pressureVar1 = s16(22) * pressurePa * pressurePa / 2147483648.0;
         pressureVar2 = pressurePa * s16(20) / 32768.0;
         pressurePa += (pressureVar1 + pressureVar2 + s16(18)) / 16.0;
 
-        std::ostringstream output;
-        output << std::fixed << std::setprecision(2)
-               << "chip_id=" << hex(id[0])
-               << ", pressure_raw=" << rawPressure
-               << ", pressure_pa=" << pressurePa
-               << ", pressure_hpa=" << (pressurePa / 100.0)
-               << ", temperature_raw=" << rawTemperature
-               << ", temperature_c=" << temperatureC;
-        return output.str();
+        result.succeeded = true;
+        result.add("chip_id", static_cast<uint64_t>(id[0]), {}, static_cast<uint64_t>(id[0]));
+        result.add("pressure_pa", pressurePa, "Pa", static_cast<uint64_t>(rawPressure));
+        result.add("pressure_hpa", pressurePa / 100.0, "hPa", static_cast<uint64_t>(rawPressure));
+        result.add("temperature_c", temperatureC, "C", static_cast<uint64_t>(rawTemperature));
+        return true;
     }
 
     std::vector<DriverAction> actions() const override {

@@ -13,6 +13,7 @@
 #include <limits>
 #include <process.h>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -60,6 +61,47 @@ bool promptUnsigned(const std::string& prompt, unsigned defaultValue, unsigned& 
     if (!parseUnsigned(input, parsed) || parsed > std::numeric_limits<unsigned>::max()) return false;
     value = static_cast<unsigned>(parsed);
     return true;
+}
+
+// Reads a numeric setting; B or Q cancels without treating zero as cancellation.
+bool promptUnsignedCancelable(const std::string& prompt, unsigned defaultValue,
+                              unsigned& value, bool& cancelled) {
+    std::cout << prompt;
+    std::string input;
+    if (!std::getline(std::cin, input)) return false;
+    if (input == "b" || input == "B" || input == "q" || input == "Q") {
+        cancelled = true;
+        return true;
+    }
+    if (input.empty()) {
+        value = defaultValue;
+        return true;
+    }
+    unsigned long parsed = 0;
+    if (!parseUnsigned(input, parsed) || parsed > std::numeric_limits<unsigned>::max()) return false;
+    value = static_cast<unsigned>(parsed);
+    return true;
+}
+
+// Reads a boolean setting; B or Q cancels the edit.
+bool promptBooleanCancelable(const std::string& prompt, bool defaultValue,
+                             bool& value, bool& cancelled) {
+    std::cout << prompt;
+    std::string input;
+    if (!std::getline(std::cin, input)) return false;
+    if (input == "b" || input == "B" || input == "q" || input == "Q") {
+        cancelled = true;
+        return true;
+    }
+    if (input.empty()) {
+        value = defaultValue;
+        return true;
+    }
+    std::transform(input.begin(), input.end(), input.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (input == "true" || input == "yes" || input == "1" || input == "on") { value = true; return true; }
+    if (input == "false" || input == "no" || input == "0" || input == "off") { value = false; return true; }
+    return false;
 }
 
 // Tests whether a path points to a regular file rather than a directory.
@@ -124,6 +166,51 @@ void showAdapters(ApplicationService& app) {
                       << "    USB release:  " << hex(adapter.release, 4) << '\n';
         } else {
             std::cout << "    Attributes unavailable: " << adapter.attributeStatus << '\n';
+        }
+        if (adapter.partNumberAvailable) {
+            std::cout << "    Part number:   " << hex(adapter.partNumber, 2)
+                      << " (version " << static_cast<unsigned>(adapter.partVersion) << ")\n";
+        } else {
+            std::cout << "    Part number unavailable: " << adapter.partNumberStatus << '\n';
+        }
+        if (adapter.usbConfigAvailable) {
+            std::cout << "    Stored USB cfg: VID:PID=" << hex(adapter.configuredVid, 4)
+                      << ':' << hex(adapter.configuredPid, 4)
+                      << ", release=" << hex(adapter.configuredRelease, 4)
+                      << ", power=" << static_cast<unsigned>(adapter.configuredPower)
+                      << ", power mode=" << hex(adapter.configuredPowerMode, 2) << '\n';
+        } else {
+            std::cout << "    Stored USB config unavailable: " << adapter.usbConfigStatus << '\n';
+        }
+        if (adapter.lockAvailable) {
+            std::cout << "    Config lock bits: " << hex(adapter.lockBits, 2) << '\n';
+        } else {
+            std::cout << "    Config lock unavailable: " << adapter.lockStatus << '\n';
+        }
+        if (adapter.smbusConfigAvailable) {
+            std::cout << "    SMBus config:   " << adapter.smbusBitRate << " Hz"
+                      << ", target=" << hex(adapter.smbusAddress, 2)
+                      << ", write timeout=" << adapter.smbusWriteTimeout << " ms"
+                      << ", read timeout=" << adapter.smbusReadTimeout << " ms"
+                      << ", retries=" << adapter.smbusTransferRetries
+                      << ", auto response=" << (adapter.smbusAutoReadRespond ? "on" : "off")
+                      << ", SCL-low timeout=" << (adapter.smbusSclLowTimeout ? "on" : "off") << '\n';
+        } else {
+            std::cout << "    SMBus config unavailable: " << adapter.smbusConfigStatus << '\n';
+        }
+        if (adapter.smbusLibraryVersionAvailable) {
+            std::cout << "    SMBus library: " << static_cast<unsigned>(adapter.smbusLibraryMajor)
+                      << '.' << static_cast<unsigned>(adapter.smbusLibraryMinor)
+                      << (adapter.smbusLibraryRelease ? " (release)" : " (debug)") << '\n';
+        } else {
+            std::cout << "    SMBus library unavailable: " << adapter.smbusLibraryVersionStatus << '\n';
+        }
+        if (adapter.hidLibraryVersionAvailable) {
+            std::cout << "    HID library:   " << static_cast<unsigned>(adapter.hidLibraryMajor)
+                      << '.' << static_cast<unsigned>(adapter.hidLibraryMinor)
+                      << (adapter.hidLibraryRelease ? " (release)" : " (debug)") << '\n';
+        } else {
+            std::cout << "    HID library unavailable: " << adapter.hidLibraryVersionStatus << '\n';
         }
         std::cout << "    Device path:  " << adapter.devicePath << '\n';
     }
@@ -342,20 +429,54 @@ void scanBus(ApplicationService& app) {
     std::string error;
     std::cout << "Press Q or Esc during scanning to cancel.\n";
     const auto reportProgress = [](unsigned address) {
-        if (_kbhit()) {
-            const int key = _getch();
-            if (key == 'q' || key == 'Q' || key == 27) return false;
-        }
         std::cout << "Scanning address 7-bit=" << hex(address)
                   << " (" << address << ")"
                   << "...\n" << std::flush;
         return true;
     };
-    if (!app.scan(options, readings, error, reportProgress)) {
+    std::atomic<bool> cancelRequested(false);
+    std::atomic<bool> scanFinished(false);
+    bool scanSucceeded = false;
+    std::thread scanThread([&]() {
+        scanSucceeded = app.scan(options, readings, error, reportProgress, &cancelRequested);
+        scanFinished.store(true);
+    });
+    bool cancellationReported = false;
+    while (!scanFinished.load()) {
+        if (_kbhit()) {
+            const int key = _getch();
+            if (key == 'q' || key == 'Q' || key == 27) {
+                cancelRequested.store(true);
+                if (!cancellationReported) {
+                    std::cout << "Cancelling active transfer...\n" << std::flush;
+                    cancellationReported = true;
+                }
+            }
+        }
+        Sleep(10);
+    }
+    scanThread.join();
+    if (!scanSucceeded) {
         std::cout << "Scan failed: " << error << "\n";
         return;
     }
     if (!error.empty()) std::cout << "\n" << error << "\n";
+    std::cout << "\nTransfer diagnostics:\n";
+    std::cout << "Address  Decimal  Result  API  State  Detail  Retries  Bytes  Timeout  Cancelled\n";
+    std::cout << "-------  -------  ------  ---  -----  ------  -------  -----  -------  ---------\n";
+    for (const ScanReading& reading : readings) {
+        const TransferDiagnostics& transfer = reading.transfer;
+        std::cout << std::left << std::setw(9) << hex(reading.address)
+                  << std::setw(9) << reading.address
+                  << std::setw(8) << (reading.readSucceeded ? "FOUND" : "MISS")
+                  << std::setw(5) << transfer.apiStatus
+                  << std::setw(7) << transfer.transferState
+                  << std::setw(8) << transfer.detailedStatus
+                  << std::setw(9) << transfer.retries
+                  << std::setw(7) << transfer.bytesTransferred
+                  << std::setw(9) << (transfer.timedOut ? "yes" : "no")
+                  << (transfer.cancelled ? "yes" : "no") << "\n";
+    }
     const size_t hits = static_cast<size_t>(std::count_if(
         readings.begin(), readings.end(), [](const ScanReading& reading) { return reading.readSucceeded; }));
     std::cout << "\nFound devices (read-probe results):\n";
@@ -438,6 +559,85 @@ void cleanLogs(ApplicationService& app) {
     std::cout << "Deleted " << result.deleted << " old log file(s); failures="
               << result.failed << "\n";
 }
+
+// Proof-of-concept frontend for the shared persisted settings API.
+void settingsMenu(ApplicationService& app) {
+    discardInputLine();
+    while (true) {
+        const AppConfig config = app.config();
+        std::cout << "\nSettings (saved to config/devices.ini):\n"
+                  << "1 General settings\n2 Device settings\n0 Back\n> ";
+        unsigned category = 0;
+        if (!promptUnsigned("", 0, category) || category == 0) return;
+        std::string key;
+        SettingValue value;
+        if (category == 1) {
+            std::cout << "\nGeneral settings:\n"
+                      << "1 transfer_timeout_ms=" << config.transferTimeoutMs << "\n"
+                      << "2 transfer_retries=" << config.transferRetries << "\n"
+                      << "3 scan_clock_hz=" << config.scanClockHz << "\n"
+                      << "4 scan_start_address=" << hex(config.scanStartAddress) << "\n"
+                      << "5 scan_end_address=" << hex(config.scanEndAddress) << "\n"
+                      << "6 default_refresh_seconds=" << config.defaultRefreshSeconds << "\n"
+                      << "7 default_log_stream=" << (config.defaultLogStream ? "true" : "false") << "\n"
+                      << "8 log_retention_days=" << config.logRetentionDays << "\n> ";
+            unsigned choice = 0;
+            if (!promptUnsigned("General setting (0 to go back): ", 0, choice)) { std::cout << "Invalid setting.\n"; continue; }
+            if (choice == 0) continue;
+            unsigned number = 0;
+            bool boolean = false;
+            bool cancelled = false;
+            switch (choice) {
+            case 1: key = "transfer_timeout_ms"; if (!promptUnsignedCancelable("New timeout [current] (B to go back): ", config.transferTimeoutMs, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            case 2: key = "transfer_retries"; if (!promptUnsignedCancelable("New retries [current] (B to go back): ", config.transferRetries, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            case 3: key = "scan_clock_hz"; if (!promptUnsignedCancelable("New scan clock [current] (B to go back): ", config.scanClockHz, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            case 4: key = "scan_start_address"; if (!promptUnsignedCancelable("New start address [current] (B to go back): ", config.scanStartAddress, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            case 5: key = "scan_end_address"; if (!promptUnsignedCancelable("New end address [current] (B to go back): ", config.scanEndAddress, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            case 6: key = "default_refresh_seconds"; if (!promptUnsignedCancelable("New default refresh [current] (B to go back): ", config.defaultRefreshSeconds, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            case 7: key = "default_log_stream"; if (!promptBooleanCancelable("New default logging (true/false, B to go back) [current]: ", config.defaultLogStream, boolean, cancelled)) continue; value = boolean; break;
+            case 8: key = "log_retention_days"; if (!promptUnsignedCancelable("New retention days [current] (B to go back): ", config.logRetentionDays, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            default: std::cout << "Invalid setting.\n"; continue;
+            }
+            if (cancelled) { std::cout << "Setting update cancelled.\n"; continue; }
+            std::string error;
+            if (!app.updateGeneralSetting(key, value, error)) std::cout << "Setting update failed: " << error << "\n";
+            else std::cout << "Saved [general] " << key << ".\n";
+        } else if (category == 2) {
+            std::cout << "\nDevices:\n";
+            for (size_t i = 0; i < config.devices.size(); ++i)
+                std::cout << i + 1 << ". " << config.devices[i].name << " [" << config.devices[i].type << "]\n";
+            unsigned selected = 0;
+            if (!promptUnsigned("Device number (0 to cancel): ", 0, selected) || selected == 0) continue;
+            if (selected > config.devices.size()) { std::cout << "Invalid device.\n"; continue; }
+            const DeviceConfig& device = config.devices[selected - 1];
+            std::cout << "1 address=" << hex(device.address) << "\n2 clock_hz=" << device.clock
+                      << "\n3 refresh_seconds=" << device.refreshSeconds
+                      << "\n4 adapter_index=" << device.adapterIndex
+                      << "\n5 log_stream=" << (device.logStream ? "true" : "false")
+                      << "\n6 enabled=" << (device.enabled ? "true" : "false") << "\n> ";
+            unsigned choice = 0;
+            if (!promptUnsigned("Device setting (0 to go back): ", 0, choice) || choice == 0) continue;
+            unsigned number = 0;
+            bool boolean = false;
+            bool cancelled = false;
+            switch (choice) {
+            case 1: key = "address"; if (!promptUnsignedCancelable("New address [current] (B to go back): ", device.address, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            case 2: key = "clock_hz"; if (!promptUnsignedCancelable("New clock [current] (B to go back): ", device.clock, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            case 3: key = "refresh_seconds"; if (!promptUnsignedCancelable("New refresh [current] (B to go back): ", device.refreshSeconds, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            case 4: key = "adapter_index"; if (!promptUnsignedCancelable("New adapter [current] (B to go back): ", device.adapterIndex, number, cancelled)) continue; value = static_cast<uint64_t>(number); break;
+            case 5: key = "log_stream"; if (!promptBooleanCancelable("New logging (true/false, B to go back) [current]: ", device.logStream, boolean, cancelled)) continue; value = boolean; break;
+            case 6: key = "enabled"; if (!promptBooleanCancelable("New enabled (true/false, B to go back) [current]: ", device.enabled, boolean, cancelled)) continue; value = boolean; break;
+            default: std::cout << "Invalid setting.\n"; continue;
+            }
+            if (cancelled) { std::cout << "Setting update cancelled.\n"; continue; }
+            std::string error;
+            if (!app.updateDeviceSetting(selected - 1, key, value, error)) std::cout << "Setting update failed: " << error << "\n";
+            else std::cout << "Saved [device " << device.name << "] " << key << ".\n";
+        } else {
+            std::cout << "Invalid category.\n";
+        }
+    }
+}
 }
 
 // Initializes the service, displays the main menu, and dispatches user commands.
@@ -463,7 +663,7 @@ int main(int argc, char** argv) {
         std::cout << "\n========== CP2112 Device Console " << versionString(app.config()) << " ==========\n"
                   << "1 List configured devices\n2 Select device\n3 Adapter information\n"
                   << "4 Reload configuration\n5 Scan I2C addresses\n"
-                  << "6 Direct register read/write\n7 Clean old logs\n0 Exit\n> ";
+                  << "6 Direct register read/write\n7 Clean old logs\n8 Settings\n0 Exit\n> ";
         int choice;
         if (!(std::cin >> choice)) {
             std::cin.clear();
@@ -500,6 +700,8 @@ int main(int argc, char** argv) {
             directRegisterCommand(app);
         } else if (choice == 7) {
             cleanLogs(app);
+        } else if (choice == 8) {
+            settingsMenu(app);
         } else {
             std::cout << "Invalid choice.\n";
         }
