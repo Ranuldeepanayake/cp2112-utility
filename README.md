@@ -14,6 +14,7 @@ The application separates the CLI and configuration handling from the device-spe
 - [Prerequisites](#prerequisites)
 - [Obtain the Silicon Labs SDK files](#obtain-the-silicon-labs-sdk-files)
 - [Build with MinGW-w64](#build-with-mingw-w64)
+- [Build the Qt GUI](#build-the-qt-gui)
 - [Run the application](#run-the-application)
 - [Main menu and navigation](#main-menu-and-navigation)
 - [Configuration reference](#configuration-reference)
@@ -223,6 +224,26 @@ You should see the generated executable, the MinGW runtime DLLs required by that
 
 The application creates the configured log directory automatically at startup. It also reports a startup prerequisite warning and stops before hardware access if the configured file, either required Silicon Labs DLL, or the audit log cannot be created.
 
+## Build the Qt GUI
+
+The Qt frontend is in `cp2112-utility-gui/`. It links the same `ApplicationService` and device-driver sources used by the CLI, so hardware access, structured readings, scan cancellation, settings persistence, logging, and validation are shared rather than reimplemented.
+
+Open `cp2112-utility-gui/CMakeLists.txt` in Qt Creator, select a 64-bit MinGW kit, configure, and build. Alternatively, from the GUI directory, use a Qt installation's CMake and Ninja tools:
+
+```powershell
+$env:Path = "C:\Qt\Tools\Ninja;C:\Qt\Tools\mingw1310_64\bin;" + $env:Path
+cmake -S . -B build\release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:\Qt\6.12.0\mingw_64
+cmake --build build\release --parallel
+```
+
+Run the GUI from the project root or a release package root so it can locate `config\devices.ini`, `logs\`, and the CP2112 DLLs. The GUI searches the current directory, its executable directory, and the nearby project-parent directories for the configuration file. A built GUI executable still requires the same 64-bit MinGW runtime DLLs and Silicon Labs DLLs as the CLI.
+
+The GUI provides a dedicated re-queryable adapter-information page, click-to-select configured devices, structured timestamped readings, driver information and actions, live polling with cancellation and follow-latest scrolling, address scanning with live scanned/responded counts and optional non-responding rows (the completed scan can be re-filtered without rescanning), direct hexadecimal register reads and writes with visible status, a separate selected-device settings dialog, persisted general settings, configuration reload under Settings, retention cleanup and a confirmed clear-all-logs action, light/dark theme selection, and separate multi-instance line charts for numeric processed or raw readings. Build metadata is shown in the bottom status area.
+
+When the GUI is built on Windows, its CMake configuration copies the GUI executable and only the required runtime files into the repository's shared `bin\` directory. This includes `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, the three MinGW runtime DLLs, and `platforms\qwindows.dll`. The GUI executable in `bin\` is ignored by Git, while these DLLs are intentionally trackable dependencies.
+
+For a standalone folder, keep the deployed Qt files beside the GUI executable and include `config\devices.ini`, `bin\SLABHIDtoSMBus.dll`, `bin\SLABHIDDevice.dll`, and the MinGW runtime DLLs. The GUI searches nearby parent directories for the configuration file, but a release folder is clearest when arranged as `config\devices.ini`, `bin\*.dll`, `logs\`, and the GUI executable.
+
 ## Run the application
 
 From the project root:
@@ -355,6 +376,7 @@ enabled=false
 | `build_timestamp` | Build timestamp (`ddMMyyyyHHmm`) embedded in the CLI build label and release package name | Default: `000000000000`; updated only in CI packages |
 | `build_number` | CI pipeline run number embedded in the CLI build label | Default: `0`; unchanged by local builds |
 | `beta` | Whether the package is a beta build | Default: `false`; updated only in CI packages |
+| `dark_mode` | GUI theme persisted in the configuration file | `true` or `false`; default `false` |
 | `default_refresh_seconds` | Default interval applied to device entries that do not override it | 1–3600; default `2` |
 | `default_log_stream` | Default stream logging choice for device entries | `true` or `false`; default `true` |
 | `scan_adapter_index` | Default CP2112 adapter used for scans; can be overridden at the scan prompt | 0–255; default `0` |

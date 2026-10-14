@@ -95,6 +95,7 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
             else if (key == "build_timestamp" && !value.empty()) config.buildTimestamp = value;
             else if (key == "build_number" && !value.empty()) config.buildNumber = value;
             else if (key == "beta" && parseBool(value, boolean)) config.betaBuild = boolean;
+            else if (key == "dark_mode" && parseBool(value, boolean)) config.darkMode = boolean;
             else if (key == "default_refresh_seconds" && parseUnsigned(value, number) && number >= 1 && number <= 3600)
                 config.defaultRefreshSeconds = static_cast<unsigned>(number);
             else if (key == "default_log_stream" && parseBool(value, boolean))
@@ -557,6 +558,8 @@ bool ApplicationService::updateGeneralSetting(const std::string& key, const Sett
         serialized = std::to_string(number); config_.defaultRefreshSeconds = static_cast<unsigned>(number);
     } else if (normalized == "default_log_stream" && settingBoolean(value, boolean)) {
         serialized = boolean ? "true" : "false"; config_.defaultLogStream = boolean;
+    } else if (normalized == "dark_mode" && settingBoolean(value, boolean)) {
+        serialized = boolean ? "true" : "false"; config_.darkMode = boolean;
     } else if (normalized == "scan_adapter_index" && settingUnsigned(value, number) && number <= 255) {
         serialized = std::to_string(number); config_.scanAdapterIndex = static_cast<unsigned>(number);
     } else if (normalized == "scan_start_address" && settingUnsigned(value, number) && number >= 0x08 && number <= config_.scanEndAddress) {
@@ -907,7 +910,8 @@ bool ApplicationService::streamDevice(size_t deviceIndex, std::atomic<bool>& sto
 // Probes each configured I2C address with bounded transfers and optional progress reporting.
 bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReading>& result,
                               std::string& error, const ScanProgressCallback& progress,
-                              std::atomic<bool>* cancelRequested) {
+                              std::atomic<bool>* cancelRequested,
+                              const ScanReadingCallback& readingProgress) {
     error.clear();
     if (!initialized_) { error = "Application service is not initialized"; return false; }
     AppLockGuard hardwareLock(hardwareMutex_);
@@ -950,6 +954,11 @@ bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReadin
         reading.readSucceeded = bus.read(address, 0x00, 1, 1, data, &reading.transfer);
         if (reading.readSucceeded) reading.value = data[0];
         result.push_back(reading);
+        if (readingProgress && !readingProgress(reading)) {
+            error = "Scan cancelled by user.";
+            if (logger_) logger_->audit("I2C scan cancelled by user");
+            break;
+        }
         if (reading.transfer.cancelled) {
             error = "Scan cancelled by user.";
             if (logger_) logger_->audit("I2C scan cancelled during transfer");
@@ -998,5 +1007,33 @@ bool ApplicationService::cleanLogs(unsigned days, LogCleanupResult& result, std:
     logger_->audit("Manual log cleanup: deleted " + std::to_string(result.deleted) +
                    " log file(s) older than " + std::to_string(days) +
                    " day(s); failures=" + std::to_string(result.failed));
+    return true;
+}
+
+// Deletes all timestamped audit and stream logs except the currently open audit log.
+bool ApplicationService::clearAllLogs(LogCleanupResult& result, std::string& error) {
+    error.clear();
+    if (!initialized_ || !logger_) { error = "Application service is not initialized"; return false; }
+    result = {};
+    const AppConfig config = this->config();
+    const std::string activeAudit = logger_->auditPath();
+    const std::string pattern = config.logDir + "\\*";
+    WIN32_FIND_DATAA entry{};
+    HANDLE search = FindFirstFileA(pattern.c_str(), &entry);
+    if (search == INVALID_HANDLE_VALUE) {
+        const DWORD status = GetLastError();
+        if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) return true;
+        error = "Could not enumerate log directory (Windows error " + std::to_string(status) + ")";
+        return false;
+    }
+    do {
+        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 || !isTimestampedLog(entry.cFileName)) continue;
+        const std::string path = config.logDir + "\\" + entry.cFileName;
+        if (lower(path) == lower(activeAudit)) continue;
+        if (DeleteFileA(path.c_str())) ++result.deleted; else ++result.failed;
+    } while (FindNextFileA(search, &entry));
+    FindClose(search);
+    logger_->audit("Manual log clear: deleted " + std::to_string(result.deleted) +
+                   " log file(s); failures=" + std::to_string(result.failed));
     return true;
 }

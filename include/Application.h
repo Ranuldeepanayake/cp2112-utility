@@ -19,6 +19,7 @@ struct AppConfig {
     std::string buildTimestamp = "000000000000";
     std::string buildNumber = "0";
     bool betaBuild = false;
+    bool darkMode = false;
     unsigned defaultRefreshSeconds = 2;
     bool defaultLogStream = true;
     unsigned scanAdapterIndex = 0;
@@ -110,6 +111,8 @@ public:
     using StructuredStreamCallback = std::function<void(const std::string&, const DeviceResult&)>;
     // Return false from the callback to cancel the scan before the next probe.
     using ScanProgressCallback = std::function<bool(unsigned)>;
+    // Receives each completed probe so frontends can show live counts and results.
+    using ScanReadingCallback = std::function<bool(const ScanReading&)>;
 
     ApplicationService();
     ~ApplicationService();
@@ -141,10 +144,12 @@ public:
                              const SettingValue& value, std::string& error);
     bool scan(const ScanOptions& options, std::vector<ScanReading>& result,
               std::string& error, const ScanProgressCallback& progress = {},
-              std::atomic<bool>* cancelRequested = nullptr);
+              std::atomic<bool>* cancelRequested = nullptr,
+              const ScanReadingCallback& readingProgress = {});
     bool updateRuntimeDevice(size_t deviceIndex, unsigned refreshSeconds,
                              bool logStream, std::string& error);
     bool cleanLogs(unsigned days, LogCleanupResult& result, std::string& error);
+    bool clearAllLogs(LogCleanupResult& result, std::string& error);
 
 private:
     bool getDevice(size_t deviceIndex, DeviceConfig& device,
