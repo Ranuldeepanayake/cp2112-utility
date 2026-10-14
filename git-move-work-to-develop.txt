@@ -1,0 +1,49 @@
+# Check the current branch and working-tree changes.
+git status --short
+
+# Stash tracked and untracked changes, including restored resource files.
+git stash push --include-untracked --message "move work to develop"
+
+# Switch to the develop branch.
+git switch develop
+
+# Reapply the stashed changes on develop.
+git stash pop
+
+# If Git reports that files already exist, inspect the retained stash.
+git stash list
+git ls-files resources
+git rev-parse 'stash@{0}^3'
+
+# List the untracked files stored in the stash.
+# Replace <stash-untracked-commit> with the commit ID printed above.
+git ls-tree -r --name-only <stash-untracked-commit>
+
+# Compare the stashed resource files with the versions on develop.
+# Replace <stash-untracked-commit> with the commit ID printed above.
+git ls-tree -r <stash-untracked-commit>
+git ls-tree -r HEAD resources
+
+# Confirm the working files are unchanged and identical to the tracked files.
+git hash-object resources/app.rc
+git hash-object resources/cp2112.ico
+git hash-object resources/cp2112-board-icon-source.png
+
+# Remove the redundant stash only after confirming the files match.
+git stash drop 'stash@{0}'
+
+# Verify the final branch and remaining working-tree changes.
+git status --short
+git branch --show-current
+git log --oneline -1
+
+
+###
+# Stash tracked and untracked local changes.
+git stash push --include-untracked --message "before updating develop"
+
+# Update the local develop branch.
+git pull --ff-only
+
+# Reapply your local changes.
+git stash pop

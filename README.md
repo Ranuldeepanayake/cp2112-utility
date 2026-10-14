@@ -293,6 +293,8 @@ scan_adapter_index=0
 scan_start_address=0x08
 scan_end_address=0x77
 scan_clock_hz=100000
+transfer_timeout_ms=500
+transfer_retries=0
 log_retention_days=30
 
 [device BMP280-1]
@@ -356,7 +358,8 @@ enabled=false
 | `scan_start_address` | Default first 7-bit I²C address for scans | `0x08`–`0x77`; default `0x08` |
 | `scan_end_address` | Default last 7-bit I²C address for scans | `0x08`–`0x77`, must be at least the start address; default `0x77` |
 | `scan_clock_hz` | Default scan bus speed | 1–400000 Hz; default `100000` |
-| `transfer_timeout_ms` | Maximum time allowed for each CP2112 transfer/probe before it is treated as failed; the full configured scan range is still visited | 1–60000 ms; default `500` |
+| `transfer_timeout_ms` | Default maximum time allowed for each CP2112 transfer/probe; can be overridden at the scan prompt. The value is limited by the CP2112 hardware maximum. | 1–1000 ms; default `500` |
+| `transfer_retries` | Default number of CP2112 hardware retries for each transfer; can be overridden at the scan prompt | 0–1000; default `0` |
 | `log_retention_days` | Automatically delete timestamped application log files at startup when their last-modified time is at least this many days old; oldest files are deleted first. `0` disables automatic cleanup. | 0–36500; default `30` |
 
 ### Device settings

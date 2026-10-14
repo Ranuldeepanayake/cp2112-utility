@@ -107,8 +107,10 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
                 config.scanEndAddress = static_cast<unsigned>(number);
             else if (key == "scan_clock_hz" && parseUnsigned(value, number) && number >= 1 && number <= 400000)
                 config.scanClockHz = static_cast<unsigned>(number);
-            else if (key == "transfer_timeout_ms" && parseUnsigned(value, number) && number >= 1 && number <= 60000)
+            else if (key == "transfer_timeout_ms" && parseUnsigned(value, number) && number >= 1 && number <= 1000)
                 config.transferTimeoutMs = static_cast<unsigned>(number);
+            else if (key == "transfer_retries" && parseUnsigned(value, number) && number <= 1000)
+                config.transferRetries = static_cast<unsigned>(number);
             else if (key == "log_retention_days" && parseUnsigned(value, number) && number <= 36500)
                 config.logRetentionDays = static_cast<unsigned>(number);
             else {
@@ -424,6 +426,7 @@ bool ApplicationService::reload(std::string& error) {
         config_.scanStartAddress = loaded.scanStartAddress;
         config_.scanEndAddress = loaded.scanEndAddress;
         config_.scanClockHz = loaded.scanClockHz;
+        config_.transferRetries = loaded.transferRetries;
         config_.buildTimestamp = loaded.buildTimestamp;
         config_.buildNumber = loaded.buildNumber;
         config_.betaBuild = loaded.betaBuild;
@@ -508,7 +511,7 @@ bool ApplicationService::readDevice(size_t deviceIndex, std::string& result, std
     AppLockGuard hardwareLock(hardwareMutex_);
     DeviceHandle handle(api_);
     if (!openDevice(device, *handle.address(), error)) return false;
-    Bus bus(api_, handle.get(), config_.transferTimeoutMs);
+    Bus bus(api_, handle.get(), config_.transferTimeoutMs, config_.transferRetries);
     if (!bus.setClock(device.clock)) {
         error = "Failed to set bus clock for " + device.name;
         return false;
@@ -545,7 +548,7 @@ bool ApplicationService::executeDeviceAction(size_t deviceIndex, const std::stri
     AppLockGuard hardwareLock(hardwareMutex_);
     DeviceHandle handle(api_);
     if (!openDevice(device, *handle.address(), error)) return false;
-    Bus bus(api_, handle.get(), config_.transferTimeoutMs);
+    Bus bus(api_, handle.get(), config_.transferTimeoutMs, config_.transferRetries);
     if (!bus.setClock(device.clock)) {
         error = "Failed to set bus clock for " + device.name;
         return false;
@@ -578,7 +581,7 @@ bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerA
         error = "Could not open adapter for direct read; status=" + std::to_string(status);
         return false;
     }
-    Bus bus(api_, handle.get(), config.transferTimeoutMs);
+    Bus bus(api_, handle.get(), config.transferTimeoutMs, config.transferRetries);
     if (!bus.setClock(config.scanClockHz)) {
         error = "Failed to set bus clock for direct read";
         return false;
@@ -615,7 +618,7 @@ bool ApplicationService::writeRegister(unsigned deviceAddress, unsigned register
         error = "Could not open adapter for direct write; status=" + std::to_string(status);
         return false;
     }
-    Bus bus(api_, handle.get(), config.transferTimeoutMs);
+    Bus bus(api_, handle.get(), config.transferTimeoutMs, config.transferRetries);
     if (!bus.setClock(config.scanClockHz)) {
         error = "Failed to set bus clock for direct write";
         return false;
@@ -638,7 +641,7 @@ bool ApplicationService::streamDevice(size_t deviceIndex, std::atomic<bool>& sto
     AppLockGuard hardwareLock(hardwareMutex_);
     DeviceHandle handle(api_);
     if (!openDevice(device, *handle.address(), error)) return false;
-    Bus bus(api_, handle.get(), config_.transferTimeoutMs);
+    Bus bus(api_, handle.get(), config_.transferTimeoutMs, config_.transferRetries);
     if (!bus.setClock(device.clock)) {
         error = "Failed to set bus clock for " + device.name;
         return false;
@@ -686,7 +689,7 @@ bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReadin
     if (options.adapterIndex >= adapterCount_) { error = "Scan adapter index is out of range"; return false; }
     if (options.startAddress < 0x08 || options.endAddress > 0x77 ||
         options.startAddress > options.endAddress || options.clockHz < 1 || options.clockHz > 400000 ||
-        options.transferTimeoutMs < 1) {
+        options.transferTimeoutMs < 1 || options.transferTimeoutMs > 1000 || options.transferRetries > 1000) {
         error = "Invalid scan address range or bus clock";
         return false;
     }
@@ -696,7 +699,7 @@ bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReadin
         error = "Could not open adapter for scan; status=" + std::to_string(status);
         return false;
     }
-    Bus bus(api_, handle.get(), options.transferTimeoutMs);
+    Bus bus(api_, handle.get(), options.transferTimeoutMs, options.transferRetries);
     if (!bus.setClock(options.clockHz)) { error = "Failed to set bus clock for scan"; return false; }
 
     if (logger_) {
@@ -705,7 +708,11 @@ bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReadin
     }
     result.clear();
     for (unsigned address = options.startAddress; address <= options.endAddress; ++address) {
-        if (progress) progress(address);
+        if (progress && !progress(address)) {
+            error = "Scan cancelled by user.";
+            if (logger_) logger_->audit("I2C scan cancelled by user");
+            break;
+        }
         std::vector<BYTE> data;
         ScanReading reading;
         reading.address = address;
@@ -715,7 +722,16 @@ bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReadin
     }
     const size_t hits = static_cast<size_t>(std::count_if(
         result.begin(), result.end(), [](const ScanReading& reading) { return reading.readSucceeded; }));
-    if (logger_) logger_->audit("I2C scan complete; successful read probes=" + std::to_string(hits));
+    if (logger_) {
+        logger_->audit("I2C scan complete; successful read probes=" + std::to_string(hits));
+        for (const ScanReading& reading : result) {
+            if (reading.readSucceeded) {
+                logger_->audit("I2C scan found device address=" + hex(reading.address) +
+                               " (" + std::to_string(reading.address) + ") value=" +
+                               hex(reading.value));
+            }
+        }
+    }
     return true;
 }
 

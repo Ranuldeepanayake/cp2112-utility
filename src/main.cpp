@@ -4,10 +4,12 @@
 
 #include "Application.h"
 #include <algorithm>
+#include <conio.h>
 #include <atomic>
 #include <cerrno>
 #include <cstdlib>
 #include <iostream>
+#include <iomanip>
 #include <limits>
 #include <process.h>
 #include <string>
@@ -314,6 +316,7 @@ void scanBus(ApplicationService& app) {
     options.endAddress = config.scanEndAddress;
     options.clockHz = config.scanClockHz;
     options.transferTimeoutMs = config.transferTimeoutMs;
+    options.transferRetries = config.transferRetries;
     discardInputLine();
     if (!promptUnsigned("Adapter index [" + std::to_string(options.adapterIndex) + "]: ",
                         options.adapterIndex, options.adapterIndex) ||
@@ -322,30 +325,52 @@ void scanBus(ApplicationService& app) {
         !promptUnsigned("Last 7-bit address [" + hex(options.endAddress) + "]: ",
                         options.endAddress, options.endAddress) ||
         !promptUnsigned("Bus speed Hz [" + std::to_string(options.clockHz) + "]: ",
-                        options.clockHz, options.clockHz)) {
+                        options.clockHz, options.clockHz) ||
+        !promptUnsigned("Transfer timeout ms [" + std::to_string(options.transferTimeoutMs) + "]: ",
+                        options.transferTimeoutMs, options.transferTimeoutMs) ||
+        !promptUnsigned("Transfer retries [" + std::to_string(options.transferRetries) + "]: ",
+                        options.transferRetries, options.transferRetries)) {
         std::cout << "Invalid numeric scan input.\n";
+        return;
+    }
+    if (options.transferTimeoutMs < 1 || options.transferTimeoutMs > 1000 ||
+        options.transferRetries > 1000) {
+        std::cout << "Transfer timeout must be 1..1000 ms and retries must be 0..1000.\n";
         return;
     }
     std::vector<ScanReading> readings;
     std::string error;
+    std::cout << "Press Q or Esc during scanning to cancel.\n";
     const auto reportProgress = [](unsigned address) {
+        if (_kbhit()) {
+            const int key = _getch();
+            if (key == 'q' || key == 'Q' || key == 27) return false;
+        }
         std::cout << "Scanning address 7-bit=" << hex(address)
                   << " (" << address << ")"
                   << "...\n" << std::flush;
+        return true;
     };
     if (!app.scan(options, readings, error, reportProgress)) {
         std::cout << "Scan failed: " << error << "\n";
         return;
     }
     if (!error.empty()) std::cout << "\n" << error << "\n";
-    std::cout << "Read-probe scan (not a guaranteed ACK-only scan):\n";
-    for (const ScanReading& reading : readings) {
-        std::cout << (reading.readSucceeded ? "[READ OK] " : "[no read] ") << hex(reading.address);
-        if (reading.readSucceeded) std::cout << " data=" << hex(reading.value);
-        std::cout << "\n";
-    }
     const size_t hits = static_cast<size_t>(std::count_if(
         readings.begin(), readings.end(), [](const ScanReading& reading) { return reading.readSucceeded; }));
+    std::cout << "\nFound devices (read-probe results):\n";
+    if (hits == 0) {
+        std::cout << "No devices found.\n";
+    } else {
+        std::cout << "Address (hex)  Address (decimal)  Probe value\n";
+        std::cout << "-------------  -----------------  -----------\n";
+        for (const ScanReading& reading : readings) {
+            if (reading.readSucceeded) {
+                std::cout << std::left << std::setw(13) << hex(reading.address)
+                          << std::setw(19) << reading.address << hex(reading.value) << "\n";
+            }
+        }
+    }
     std::cout << "Scan complete; successful read probes=" << hits << "\n";
 }
 

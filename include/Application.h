@@ -22,6 +22,7 @@ struct AppConfig {
     unsigned scanEndAddress = 0x77;
     unsigned scanClockHz = 100000;
     unsigned transferTimeoutMs = 500;
+    unsigned transferRetries = 0;
     unsigned logRetentionDays = 30;
     std::vector<DeviceConfig> devices;
 };
@@ -45,6 +46,7 @@ struct ScanOptions {
     unsigned endAddress = 0x77;
     unsigned clockHz = 100000;
     unsigned transferTimeoutMs = 500;
+    unsigned transferRetries = 0;
 };
 
 struct ScanReading {
@@ -67,7 +69,8 @@ struct LogCleanupResult {
 class ApplicationService {
 public:
     using StreamCallback = std::function<void(const std::string&, const std::string&)>;
-    using ScanProgressCallback = std::function<void(unsigned)>;
+    // Return false from the callback to cancel the scan before the next probe.
+    using ScanProgressCallback = std::function<bool(unsigned)>;
 
     ApplicationService();
     ~ApplicationService();

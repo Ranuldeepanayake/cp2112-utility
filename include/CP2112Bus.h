@@ -98,11 +98,18 @@ class Bus {
     Api& api_;
     Device handle_ = nullptr;
     DWORD timeoutMs_ = 500;
+    WORD transferRetries_ = 0;
 public:
-    Bus(Api& api, Device h, unsigned timeoutMs = 500)
-        : api_(api), handle_(h), timeoutMs_(timeoutMs) {}
+    Bus(Api& api, Device h, unsigned timeoutMs = 500, unsigned transferRetries = 0)
+        : api_(api), handle_(h), timeoutMs_(timeoutMs),
+          transferRetries_(static_cast<WORD>(std::min<unsigned>(transferRetries, 1000))) {}
     bool setClock(DWORD hz) {
-        return api_.setConfig(handle_, hz, 0x02, TRUE, 100, 300, TRUE, 2) == 0;
+        // The CP2112 enforces its own transfer timeout. Keep it aligned with
+        // the application's timeout instead of relying only on host polling.
+        // The DLL accepts a maximum of 1000 ms; values above that are capped.
+        const WORD hardwareTimeout = static_cast<WORD>(std::min<DWORD>(timeoutMs_, 1000));
+        return api_.setConfig(handle_, hz, 0x02, TRUE, hardwareTimeout, hardwareTimeout,
+                              TRUE, transferRetries_) == 0;
     }
     bool read(unsigned address, unsigned reg, unsigned regBytes, unsigned length, std::vector<BYTE>& out) {
         if (length < 1 || length > 512 || regBytes < 1 || regBytes > 2) return false;
