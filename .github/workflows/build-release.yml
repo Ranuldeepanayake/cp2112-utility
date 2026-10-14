@@ -185,6 +185,17 @@ jobs:
             throw "windres failed with exit code $LASTEXITCODE"
           }
 
+      # Action: install the cached Qt Widgets package required by the GUI build.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.12.0'
+          host: windows
+          target: desktop
+          arch: win64_mingw
+          archives: qtbase
+          cache: true
+
       # Action: compile the CLI executable using its pipeline-specific name.
       - name: Build executable
         shell: pwsh
@@ -202,6 +213,57 @@ jobs:
             drivers\DS3231.cpp drivers\BQ4050.cpp `
             build\app-res.o `
             -o "bin\$env:EXECUTABLE_NAME.exe"
+
+      # Action: configure and build the Qt GUI against the shared application service.
+      - name: Build Qt GUI
+        shell: pwsh
+        run: |
+          # Confirm that the Qt action supplied a usable installation root.
+          if (-not $env:QT_ROOT_DIR) {
+            throw 'QT_ROOT_DIR was not provided by install-qt-action.'
+          }
+          if (-not (Test-Path (Join-Path $env:QT_ROOT_DIR 'lib\cmake\Qt6'))) {
+            throw "Qt 6 CMake package was not found below QT_ROOT_DIR: $env:QT_ROOT_DIR"
+          }
+
+          # Use Ninja and the pinned MinGW compiler already placed on PATH.
+          cmake -S cp2112-utility-gui `
+                -B cp2112-utility-gui\build\release `
+                -G Ninja `
+                -DCMAKE_BUILD_TYPE=Release `
+                -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+                -DCP2112_SKIP_RUNTIME_COPY=ON
+          if ($LASTEXITCODE -ne 0) { throw "Qt GUI CMake configuration failed with exit code $LASTEXITCODE" }
+
+          cmake --build cp2112-utility-gui\build\release --parallel
+          if ($LASTEXITCODE -ne 0) { throw "Qt GUI build failed with exit code $LASTEXITCODE" }
+
+          # The GUI CMake post-build step places the GUI executable in bin.
+          if (-not (Test-Path 'bin\cp2112-utility-gui.exe')) {
+            throw 'The Qt GUI executable was not produced in bin.'
+          }
+
+          # Add Qt runtime files only when the repository does not already contain them.
+          New-Item -ItemType Directory -Force 'bin\platforms' | Out-Null
+          $qtRuntimeFiles = @('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll')
+          foreach ($runtimeName in $qtRuntimeFiles) {
+            $destination = Join-Path 'bin' $runtimeName
+            if (-not (Test-Path $destination)) {
+              $source = Join-Path $env:QT_ROOT_DIR "bin\$runtimeName"
+              if (-not (Test-Path $source)) { throw "Qt runtime file was not found: $source" }
+              Copy-Item $source $destination
+            } else {
+              Write-Host "Keeping repository Qt runtime DLL: $destination"
+            }
+          }
+          $platformDestination = 'bin\platforms\qwindows.dll'
+          if (-not (Test-Path $platformDestination)) {
+            $platformSource = Join-Path $env:QT_ROOT_DIR 'plugins\platforms\qwindows.dll'
+            if (-not (Test-Path $platformSource)) { throw "Qt platform plugin was not found: $platformSource" }
+            Copy-Item $platformSource $platformDestination
+          } else {
+            Write-Host "Keeping repository Qt platform plugin: $platformDestination"
+          }
 
       # Action: verify that the executable and Silicon Labs DLLs use the same
       # PE architecture, preventing Windows error 193 packages.
@@ -226,6 +288,7 @@ jobs:
           # Check the executable and both vendor DLLs before packaging.
           $files = @(
             "bin\$env:EXECUTABLE_NAME.exe",
+            'bin\cp2112-utility-gui.exe',
             'bin\SLABHIDDevice.dll',
             'bin\SLABHIDtoSMBus.dll'
           )
@@ -311,8 +374,13 @@ jobs:
           # Copy all imports discovered from the executable and its dependencies.
           $bundled = @()
           foreach ($dependency in $runtimeDependencies) {
-            Copy-Item $runtimePaths[$dependency] bin -Force
-            $bundled += $dependency
+            $destination = Join-Path 'bin' $dependency
+            if (-not (Test-Path $destination)) {
+              Copy-Item $runtimePaths[$dependency] $destination
+            } else {
+              Write-Host "Keeping repository runtime DLL: $destination"
+            }
+            if ($bundled -notcontains $dependency) { $bundled += $dependency }
           }
 
           if ($bundled.Count -eq 0) {
@@ -325,10 +393,13 @@ jobs:
           $explicitRuntimeFiles = Get-ChildItem -Path $toolchainBin -File |
             Where-Object { $_.Name -match '^(libgcc_s_seh-\d+\.dll|libstdc\+\+-\d+\.dll|libwinpthread-\d+\.dll|libmcfgthread-\d+\.dll)$' }
           foreach ($runtimeFile in $explicitRuntimeFiles) {
-            Copy-Item $runtimeFile.FullName bin -Force
-            if ($bundled -notcontains $runtimeFile.Name) {
-              $bundled += $runtimeFile.Name
+            $destination = Join-Path 'bin' $runtimeFile.Name
+            if (-not (Test-Path $destination)) {
+              Copy-Item $runtimeFile.FullName $destination
+            } else {
+              Write-Host "Keeping repository runtime DLL: $destination"
             }
+            if ($bundled -notcontains $runtimeFile.Name) { $bundled += $runtimeFile.Name }
           }
 
           # Verify that every required runtime DLL is physically in bin.

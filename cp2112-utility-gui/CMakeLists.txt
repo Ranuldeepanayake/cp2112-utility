@@ -71,30 +71,40 @@ if(WIN32)
     set(SHARED_BIN_DIR "${CORE_ROOT}/bin")
     get_filename_component(MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     set(QT_PLATFORM_PLUGIN "${Qt${QT_VERSION_MAJOR}_DIR}/../../../plugins/platforms/qwindows.dll")
-    add_custom_command(TARGET cp2112-utility-gui POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${SHARED_BIN_DIR}"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${SHARED_BIN_DIR}/platforms"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Core>"
-                "${SHARED_BIN_DIR}/$<TARGET_FILE_NAME:Qt${QT_VERSION_MAJOR}::Core>"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Gui>"
-                "${SHARED_BIN_DIR}/$<TARGET_FILE_NAME:Qt${QT_VERSION_MAJOR}::Gui>"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Widgets>"
-                "${SHARED_BIN_DIR}/$<TARGET_FILE_NAME:Qt${QT_VERSION_MAJOR}::Widgets>"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${MINGW_BIN_DIR}/libgcc_s_seh-1.dll" "${SHARED_BIN_DIR}/libgcc_s_seh-1.dll"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${MINGW_BIN_DIR}/libstdc++-6.dll" "${SHARED_BIN_DIR}/libstdc++-6.dll"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${MINGW_BIN_DIR}/libwinpthread-1.dll" "${SHARED_BIN_DIR}/libwinpthread-1.dll"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${QT_PLATFORM_PLUGIN}" "${SHARED_BIN_DIR}/platforms/qwindows.dll"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "$<TARGET_FILE:cp2112-utility-gui>"
-                "${SHARED_BIN_DIR}/cp2112-utility-gui.exe"
-        COMMENT "Copying GUI executable and required runtime files to bin")
+    option(CP2112_SKIP_RUNTIME_COPY "Leave repository runtime DLLs unchanged for CI packaging" OFF)
+    if(CP2112_SKIP_RUNTIME_COPY)
+        add_custom_command(TARGET cp2112-utility-gui POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${SHARED_BIN_DIR}"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:cp2112-utility-gui>"
+                    "${SHARED_BIN_DIR}/cp2112-utility-gui.exe"
+            COMMENT "Copying GUI executable to bin")
+    else()
+        add_custom_command(TARGET cp2112-utility-gui POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${SHARED_BIN_DIR}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${SHARED_BIN_DIR}/platforms"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Core>"
+                    "${SHARED_BIN_DIR}/$<TARGET_FILE_NAME:Qt${QT_VERSION_MAJOR}::Core>"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Gui>"
+                    "${SHARED_BIN_DIR}/$<TARGET_FILE_NAME:Qt${QT_VERSION_MAJOR}::Gui>"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Widgets>"
+                    "${SHARED_BIN_DIR}/$<TARGET_FILE_NAME:Qt${QT_VERSION_MAJOR}::Widgets>"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${MINGW_BIN_DIR}/libgcc_s_seh-1.dll" "${SHARED_BIN_DIR}/libgcc_s_seh-1.dll"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${MINGW_BIN_DIR}/libstdc++-6.dll" "${SHARED_BIN_DIR}/libstdc++-6.dll"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${MINGW_BIN_DIR}/libwinpthread-1.dll" "${SHARED_BIN_DIR}/libwinpthread-1.dll"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${QT_PLATFORM_PLUGIN}" "${SHARED_BIN_DIR}/platforms/qwindows.dll"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:cp2112-utility-gui>"
+                    "${SHARED_BIN_DIR}/cp2112-utility-gui.exe"
+            COMMENT "Copying GUI executable and required runtime files to bin")
+    endif()
 endif()
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
