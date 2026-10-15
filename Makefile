@@ -3,7 +3,9 @@
 # Allow callers to select another compiler while defaulting to g++ on PATH.
 CXX ?= g++
 # Build a 64-bit executable to match the Silicon Labs runtime DLLs.
-CXXFLAGS ?= -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude
+# Statically link the MinGW C++/thread runtime so the CLI can share bin/ with
+# the Qt GUI without mixing incompatible runtime DLL versions.
+CXXFLAGS ?= -m64 -static -static-libgcc -static-libstdc++ -std=c++17 -O2 -Wall -Wextra -Iinclude
 
 # Keep the executable in bin/ so it has the same layout as release packages.
 TARGET := bin/cp2112_console.exe

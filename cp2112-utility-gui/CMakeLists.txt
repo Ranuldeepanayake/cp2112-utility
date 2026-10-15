@@ -73,6 +73,7 @@ if(WIN32)
     set(SHARED_BIN_DIR "${CORE_ROOT}/bin")
     get_filename_component(MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     set(QT_PLATFORM_PLUGIN "${Qt${QT_VERSION_MAJOR}_DIR}/../../../plugins/platforms/qwindows.dll")
+    set(MINGW_MCFGTHREAD_DLL "${MINGW_BIN_DIR}/libmcfgthread-2.dll")
     option(CP2112_SKIP_RUNTIME_COPY "Leave repository runtime DLLs unchanged for CI packaging" OFF)
     if(CP2112_SKIP_RUNTIME_COPY)
         add_custom_command(TARGET cp2112-utility-gui POST_BUILD
@@ -106,6 +107,12 @@ if(WIN32)
                     "$<TARGET_FILE:cp2112-utility-gui>"
                     "${SHARED_BIN_DIR}/cp2112-utility-gui.exe"
             COMMENT "Copying GUI executable and required runtime files to bin")
+    endif()
+    if(EXISTS "${MINGW_MCFGTHREAD_DLL}" AND NOT CP2112_SKIP_RUNTIME_COPY)
+        add_custom_command(TARGET cp2112-utility-gui POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${MINGW_MCFGTHREAD_DLL}" "${SHARED_BIN_DIR}/libmcfgthread-2.dll"
+            COMMENT "Copying optional MinGW MCF runtime")
     endif()
 endif()
 

@@ -207,10 +207,11 @@ jobs:
           Get-ChildItem bin -Filter '*.exe' -File | Remove-Item -Force
 
           # Compile and link all application sources together with the icon resource.
-          g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude `
+          g++ -m64 -static -static-libgcc -static-libstdc++ -std=c++17 -O2 -Wall -Wextra -Iinclude `
             src\main.cpp src\Application.cpp src\DriverRegistry.cpp `
             drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp `
             drivers\DS3231.cpp drivers\BQ4050.cpp `
+            drivers\24C32BN.cpp drivers\SSD1306.cpp `
             build\app-res.o `
             -o "bin\$env:EXECUTABLE_NAME.exe"
 
@@ -226,12 +227,30 @@ jobs:
             throw "Qt 6 CMake package was not found below QT_ROOT_DIR: $env:QT_ROOT_DIR"
           }
 
-          # Use Ninja and the pinned MinGW compiler already placed on PATH.
+          # Build the GUI with the MinGW kit used to build the installed Qt DLLs.
+          # The CLI uses the separately pinned WinLibs compiler and is statically
+          # linked, so its runtime cannot safely be shared with the Qt executable.
+          $qtRootParent = Split-Path $env:QT_ROOT_DIR -Parent
+          $qtCompiler = Get-ChildItem -Path (Join-Path $qtRootParent 'Tools') -Filter 'g++.exe' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'mingw' } |
+            Select-Object -First 1
+          if (-not $qtCompiler) {
+            throw "Qt's bundled MinGW compiler was not found below $qtRootParent\Tools"
+          }
+          $qtCompilerBin = Split-Path $qtCompiler.FullName
+          $qtCompilerTarget = (& (Join-Path $qtCompilerBin 'g++') -dumpmachine).Trim()
+          if ($qtCompilerTarget -notmatch 'x86_64|amd64') {
+            throw "Qt's compiler is not 64-bit: $qtCompilerTarget"
+          }
+          Write-Host "Using Qt MinGW compiler: $($qtCompiler.FullName)"
+
+          # Use Ninja and explicitly select the Qt-compatible 64-bit compiler.
           cmake -S cp2112-utility-gui `
                 -B cp2112-utility-gui\build\release `
                 -G Ninja `
                 -DCMAKE_BUILD_TYPE=Release `
                 -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+                -DCMAKE_CXX_COMPILER="$($qtCompiler.FullName)" `
                 -DCP2112_SKIP_RUNTIME_COPY=ON
           if ($LASTEXITCODE -ne 0) { throw "Qt GUI CMake configuration failed with exit code $LASTEXITCODE" }
 
@@ -254,6 +273,19 @@ jobs:
               Copy-Item $source $destination
             } else {
               Write-Host "Keeping repository Qt runtime DLL: $destination"
+            }
+          }
+          # Copy Qt MinGW runtime files only when the repository does not already
+          # contain them. This preserves the tracked, known-good DLL versions.
+          $qtMinGWRuntimeFiles = @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')
+          foreach ($runtimeName in $qtMinGWRuntimeFiles) {
+            $destination = Join-Path 'bin' $runtimeName
+            if (-not (Test-Path $destination)) {
+              $source = Join-Path $qtCompilerBin $runtimeName
+              if (-not (Test-Path $source)) { throw "Qt MinGW runtime file was not found: $source" }
+              Copy-Item $source $destination
+            } else {
+              Write-Host "Keeping repository Qt MinGW runtime: $destination"
             }
           }
           $platformDestination = 'bin\platforms\qwindows.dll'
@@ -383,10 +415,6 @@ jobs:
             if ($bundled -notcontains $dependency) { $bundled += $dependency }
           }
 
-          if ($bundled.Count -eq 0) {
-            throw 'No MinGW runtime DLL was bundled; the release may fail on machines without MinGW installed.'
-          }
-
           # Include the runtime DLL naming variants shipped by WinLibs.
           # Explicitly include the runtime names shipped by the pinned WinLibs
           # archive, including the MCF runtime libmcfgthread-2.dll.
@@ -400,6 +428,12 @@ jobs:
               Write-Host "Keeping repository runtime DLL: $destination"
             }
             if ($bundled -notcontains $runtimeFile.Name) { $bundled += $runtimeFile.Name }
+          }
+
+          # A statically linked CLI may have no imported MinGW runtime; the
+          # explicit toolchain runtime set above still validates the package.
+          if ($bundled.Count -eq 0) {
+            throw 'No MinGW runtime DLL was available for the release package.'
           }
 
           # Verify that every required runtime DLL is physically in bin.

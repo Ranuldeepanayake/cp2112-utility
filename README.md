@@ -193,7 +193,7 @@ For an exact match with CI, use the pinned WinLibs archive `x86_64-16.2.0-releas
 
 `mingw32-make` is the traditional Windows executable name for MinGW's GNU Make program. It does not mean that the build is 32-bit; the compiler target is controlled by `g++`, and this project explicitly uses the 64-bit `x86_64-w64-mingw32` compiler with `-m64`. There is normally no separate `mingw64-make` executable.
 
-The Makefile compiles all application and driver sources, embeds `resources\cp2112.ico` through the intermediate `build\app-res.o` resource object, and produces `bin\cp2112_console.exe`. It creates `bin/`, `build/`, and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated build outputs are ignored by Git.
+The Makefile compiles all application and driver sources, statically links the MinGW C++ runtime, embeds `resources\cp2112.ico` through the intermediate `build\app-res.o` resource object, and produces `bin\cp2112_console.exe`. Static linking lets the CLI share `bin\` with the Qt GUI without mixing incompatible MinGW runtime DLL versions. It creates `bin/`, `build/`, and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated build outputs are ignored by Git.
 
 Other Make targets are:
 
@@ -215,7 +215,7 @@ New-Item -ItemType Directory -Force bin, logs
 ```powershell
 New-Item -ItemType Directory -Force build, bin, logs
 windres resources\app.rc -O coff -o build\app-res.o
-g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp drivers\24C32BN.cpp drivers\SSD1306.cpp build\app-res.o -o bin\cp2112_console.exe
+g++ -m64 -static -static-libgcc -static-libstdc++ -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp drivers\24C32BN.cpp drivers\SSD1306.cpp build\app-res.o -o bin\cp2112_console.exe
 ```
 
 The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
@@ -254,7 +254,7 @@ Run the GUI from the project root or a release package root so it can locate `co
 
 The GUI provides a dedicated re-queryable adapter-information page, click-to-select configured devices, structured timestamped readings, driver information and actions, live polling with cancellation and follow-latest scrolling, address scanning with live scanned/responded counts and optional non-responding rows (the completed scan can be re-filtered without rescanning), direct hexadecimal register reads and writes with visible status, a separate selected-device settings dialog, persisted general settings, configuration reload under Settings, retention cleanup and a confirmed clear-all-logs action, light/dark theme selection, and separate multi-instance line charts for numeric processed or raw readings. Build metadata is shown in the bottom status area.
 
-When the GUI is built on Windows, its CMake configuration copies the GUI executable and only the required runtime files into the repository's shared `bin\` directory. This includes `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, the three MinGW runtime DLLs, and `platforms\qwindows.dll`. The GUI executable in `bin\` is ignored by Git, while these DLLs are intentionally trackable dependencies.
+When the GUI is built on Windows, its CMake configuration copies the GUI executable and Qt's matching runtime files into the repository's shared `bin\` directory. This includes `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, Qt's MinGW runtime DLLs, and `platforms\qwindows.dll`. The CLI statically links its C++ runtime so it can share this directory without mixing incompatible MinGW runtime versions. The GUI executable in `bin\` is ignored by Git, while the DLLs are intentionally trackable dependencies.
 
 For a standalone folder, keep the deployed Qt files beside the GUI executable and include `config\devices.ini`, `bin\SLABHIDtoSMBus.dll`, `bin\SLABHIDDevice.dll`, and the MinGW runtime DLLs. The GUI searches nearby parent directories for the configuration file, but a release folder is clearest when arranged as `config\devices.ini`, `bin\*.dll`, `logs\`, and the GUI executable.
 
