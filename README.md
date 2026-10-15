@@ -112,9 +112,15 @@ cp2112-device-console/
 ├── config/
 │   └── devices.ini
 ├── bin/
-│   ├── cp2112_console.exe        # generated during build
-│   ├── SLABHIDtoSMBus.dll        # supplied by Silicon Labs SDK
-│   └── SLABHIDDevice.dll         # supplied by Silicon Labs SDK
+│   ├── cli/
+│   │   ├── cp2112_console.exe    # generated during build
+│   │   └── MinGW runtime DLLs    # tracked CLI dependencies
+│   ├── gui/
+│   │   ├── cp2112-utility-gui.exe # generated during build
+│   │   ├── Qt and MinGW DLLs      # tracked GUI dependencies
+│   │   ├── SLABHIDtoSMBus.dll     # supplied by Silicon Labs SDK
+│   │   ├── SLABHIDDevice.dll      # supplied by Silicon Labs SDK
+│   │   └── platforms/qwindows.dll
 ├── logs/                         # generated at runtime
 └── README.md
 ```
@@ -164,17 +170,19 @@ For any release package, include the license files/notices that accompany the ex
 
 Start at the official [Silicon Labs CP2112 software page](https://www.silabs.com/interface/usb-bridges/classic/device.cp2112?tab=softwareandtools).
 
-Download/install the applicable CP2112 software package and locate the runtime DLLs. Copy these files into the project's `bin/` directory:
+Download/install the applicable CP2112 software package and locate the runtime DLLs. Copy these files into both `bin\cli` and `bin\gui`:
 
 ```text
-bin/
+bin/cli/
 ├── SLABHIDtoSMBus.dll
 └── SLABHIDDevice.dll
 ```
 
-The DLLs must match the architecture of the executable. This project requires 64-bit Silicon Labs DLLs, so local builds and the GitHub Actions workflow use the available 64-bit MinGW-w64 compiler and build with `-m64`. The workflow checks the compiler and DLL architectures before packaging; a mismatch is rejected instead of producing a package that fails with Windows error 193.
+The DLLs must match the architecture of the executable. This project requires 64-bit Silicon Labs DLLs, so local builds and the GitHub Actions workflow use the available 64-bit MinGW-w64 compiler and build with `-m64`. The workflow checks the compiler and DLL architectures before packaging; a mismatch is rejected instead of producing a package that fails with Windows error 193. There are no Silicon Labs DLLs in `bin` root: each executable directory contains the copy it needs, alongside its own toolchain DLLs.
 
 The source dynamically loads `SLABHIDtoSMBus.dll`. It does not require an MSVC import library for this dynamic-loading approach.
+
+The configuration keeps the portable logical value `bridge_dll=bin\SLABHIDtoSMBus.dll`. At startup, each executable falls back to its own directory (`bin\cli` or `bin\gui`) because that is where its matching Silicon Labs DLL copies live. The default `log_dir=logs` is resolved relative to the package root, which is two levels above either executable, and the application creates that directory automatically.
 
 ## Build with MinGW-w64
 
@@ -193,7 +201,7 @@ For an exact match with CI, use the pinned WinLibs archive `x86_64-16.2.0-releas
 
 `mingw32-make` is the traditional Windows executable name for MinGW's GNU Make program. It does not mean that the build is 32-bit; the compiler target is controlled by `g++`, and this project explicitly uses the 64-bit `x86_64-w64-mingw32` compiler with `-m64`. There is normally no separate `mingw64-make` executable.
 
-The Makefile compiles all application and driver sources, statically links the MinGW C++ runtime, embeds `resources\cp2112.ico` through the intermediate `build\app-res.o` resource object, and produces `bin\cp2112_console.exe`. Static linking lets the CLI share `bin\` with the Qt GUI without mixing incompatible MinGW runtime DLL versions. It creates `bin/`, `build/`, and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated build outputs are ignored by Git.
+The Makefile compiles all application and driver sources, dynamically links the MinGW C++ runtime, copies the selected toolchain's runtime DLLs into `bin\cli`, embeds `resources\cp2112.ico` through the intermediate `build\app-res.o` resource object, and produces `bin\cli\cp2112_console.exe`. Set `TOOLCHAIN_BIN` when the 64-bit MinGW installation is not `C:\mingw64\bin`. It creates `bin\cli`, `build/`, and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated executables are ignored by Git while the required DLLs are tracked.
 
 Other Make targets are:
 
@@ -207,15 +215,15 @@ The `run` target must be launched from the project or release-package root so th
 ### 1. Create the output directory if needed
 
 ```powershell
-New-Item -ItemType Directory -Force bin, logs
+New-Item -ItemType Directory -Force bin\cli, logs
 ```
 
 ### 2. Compile and link the main application and all drivers
 
 ```powershell
-New-Item -ItemType Directory -Force build, bin, logs
+New-Item -ItemType Directory -Force build, bin\cli, logs
 windres resources\app.rc -O coff -o build\app-res.o
-g++ -m64 -static -static-libgcc -static-libstdc++ -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp drivers\24C32BN.cpp drivers\SSD1306.cpp build\app-res.o -o bin\cp2112_console.exe
+g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp drivers\24C32BN.cpp drivers\SSD1306.cpp build\app-res.o -o bin\cli\cp2112_console.exe
 ```
 
 The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
@@ -234,7 +242,7 @@ The executable icon is defined by `resources\app.rc` and `resources\cp2112.ico`.
 Get-ChildItem bin
 ```
 
-You should see the generated executable, the MinGW runtime DLLs required by that executable, and the two Silicon Labs DLLs. The executable is created by compilation; the Silicon Labs DLLs must be copied from the SDK.
+You should see the CLI executable and its MinGW runtime DLLs in `bin\cli`, plus the two common Silicon Labs DLLs in `bin`. The executable is created by compilation; the Silicon Labs DLLs must be copied from the SDK.
 
 The application creates the configured log directory automatically at startup. It also reports a startup prerequisite warning and stops before hardware access if the configured file, either required Silicon Labs DLL, or the audit log cannot be created.
 
@@ -250,30 +258,30 @@ cmake -S . -B build\release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_P
 cmake --build build\release --parallel
 ```
 
-Run the GUI from the project root or a release package root so it can locate `config\devices.ini`, `logs\`, and the CP2112 DLLs. The GUI searches the current directory, its executable directory, and the nearby project-parent directories for the configuration file. A built GUI executable still requires the same 64-bit MinGW runtime DLLs and Silicon Labs DLLs as the CLI.
+Run the GUI from the project root or a release package root so it can locate `config\devices.ini`, `logs\`, and the CP2112 DLLs. The GUI searches the current directory, its executable directory, and the nearby project-parent directories for the configuration file. The GUI uses the Qt runtime files in `bin\gui`; the CLI uses the separate MinGW runtime files in `bin\cli`.
 
 The GUI provides a dedicated re-queryable adapter-information page, click-to-select configured devices, structured timestamped readings, driver information and actions, live polling with cancellation and follow-latest scrolling, address scanning with live scanned/responded counts and optional non-responding rows (the completed scan can be re-filtered without rescanning), direct hexadecimal register reads and writes with visible status, a separate selected-device settings dialog, persisted general settings, configuration reload under Settings, retention cleanup and a confirmed clear-all-logs action, light/dark theme selection, and separate multi-instance line charts for numeric processed or raw readings. Build metadata is shown in the bottom status area.
 
-When the GUI is built on Windows, its CMake configuration copies the GUI executable and Qt's matching runtime files into the repository's shared `bin\` directory. This includes `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, Qt's MinGW runtime DLLs, and `platforms\qwindows.dll`. The CLI statically links its C++ runtime so it can share this directory without mixing incompatible MinGW runtime versions. The GUI executable in `bin\` is ignored by Git, while the DLLs are intentionally trackable dependencies.
+When the GUI is built on Windows, its CMake configuration copies the GUI executable and Qt's matching runtime files into `bin\gui`. This includes `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, Qt's MinGW runtime DLLs, and `platforms\qwindows.dll`. The GUI executable is ignored by Git, while the runtime DLLs are intentionally trackable dependencies.
 
-For a standalone folder, keep the deployed Qt files beside the GUI executable and include `config\devices.ini`, `bin\SLABHIDtoSMBus.dll`, `bin\SLABHIDDevice.dll`, and the MinGW runtime DLLs. The GUI searches nearby parent directories for the configuration file, but a release folder is clearest when arranged as `config\devices.ini`, `bin\*.dll`, `logs\`, and the GUI executable.
+For a standalone folder, keep `config\devices.ini` two levels above either executable, keep the Silicon Labs DLLs in `bin` and beside each executable, keep the CLI executable and MinGW DLLs in `bin\cli`, and keep the GUI executable, Qt DLLs, and `platforms\qwindows.dll` in `bin\gui`.
 
 ## Run the application
 
 From the project root:
 
 ```powershell
-.\bin\cp2112_console.exe
+.\bin\cli\cp2112_console.exe
 ```
 
-Release packages contain both `bin/` and `config/` at the package root. The executable searches the current directory, its parent directory, and the executable/package directories for `config\devices.ini`, so it can be launched from either the package root or directly from `bin/`. Relative `bridge_dll` and `log_dir` paths are resolved from the package root when the config file is inside the standard `config/` directory.
+Release packages contain both `bin/` and `config/` at the package root. Each executable is two directory levels below the package root (`bin\cli` or `bin\gui`) and searches upward for `config\devices.ini`. Relative `bridge_dll` and `log_dir` paths are resolved from the package root when the config file is inside the standard `config/` directory.
 
 By default, the program reads `config\devices.ini`.
 
 To use a different configuration file:
 
 ```powershell
-.\bin\cp2112_console.exe .\config\devices.ini
+.\bin\cli\cp2112_console.exe .\config\devices.ini
 ```
 
 Use paths relative to the working directory from which you launch the application unless you update the source to resolve paths relative to the executable.
@@ -286,7 +294,7 @@ The workflow is stored in `.github/workflows/build-release.yml`. It runs for:
 - A merged `develop` to `main` pull request (`github.event.pull_request.merged == true`): creates a production build.
 - A manual dispatch from `develop`: creates a beta build.
 
-The workflow checks for an available 64-bit MinGW-w64 compiler, installs cached Qt 6.12, builds the CLI executable as `cp2112_console.exe`, builds the Qt GUI with CMake/Ninja, verifies that the executables and Silicon Labs DLLs are 64-bit, bundles only missing imported runtime DLLs, and packages both `bin/` and `config/`. Existing tracked Qt, MinGW, and Silicon Labs DLLs in `bin/` are preserved; runner copies are used only when a required file is absent. The ZIP/release name is `cp2112_utility-ddmmyyyyhhmm-buildnumber-beta.zip` for beta builds or `cp2112_utility-ddmmyyyyhhmm-buildnumber.zip` for merged releases. Opening a `develop` to `main` pull request creates a beta package; closing it as merged (`github.event.pull_request.merged == true`) creates the release package without a state suffix. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
+The workflow checks for an available 64-bit MinGW-w64 compiler, installs cached Qt 6.12, dynamically builds the CLI into `bin/cli`, builds the Qt GUI into `bin/gui`, verifies that the executables and Silicon Labs DLLs are 64-bit, bundles only missing runtime DLLs into the matching subdirectory, and packages both `bin/` and `config/`. Existing tracked Qt, MinGW, and Silicon Labs DLLs are preserved; runner copies are used only when a required file is absent. The ZIP/release name is `cp2112_utility-ddmmyyyyhhmm-buildnumber-beta.zip` for beta builds or `cp2112_utility-ddmmyyyyhhmm-buildnumber.zip` for merged releases. Opening a `develop` to `main` pull request creates a beta package; closing it as merged (`github.event.pull_request.merged == true`) creates the release package without a state suffix. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
 
 After compilation succeeds, CI updates `build_timestamp` (`ddMMyyyyHHmm`), `build_number`, and `beta` in `config\devices.ini`, commits those values back to the source branch, and uses that commit for the release tag. If compilation fails, no metadata commit or release tag is created. The workflow must be present on `main` before merged pull request events can trigger production runs.
 
@@ -395,7 +403,7 @@ enabled=false
 | Key | Meaning | Accepted values / default |
 |---|---|---|
 | `bridge_dll` | Path to Silicon Labs HID-to-SMBus DLL | Default: `bin\SLABHIDtoSMBus.dll` |
-| `log_dir` | Directory for audit and stream logs | Default: `logs` |
+| `log_dir` | Directory for audit and stream logs | Default: `logs`, resolved to the package root two levels above `bin\cli` or `bin\gui` |
 | `build_timestamp` | Build timestamp (`ddMMyyyyHHmm`) embedded in the CLI build label and release package name | Default: `000000000000`; updated only in CI packages |
 | `build_number` | CI pipeline run number embedded in the CLI build label | Default: `0`; unchanged by local builds |
 | `beta` | Whether the package is a beta build | Default: `false`; updated only in CI packages |
@@ -524,7 +532,8 @@ SBS word values and ManufacturerData words are decoded little-endian. Manufactur
 If `log_stream=true`, or stream logging is enabled from the device menu, starting a stream creates a CSV file such as:
 
 ```text
-logs/BMP280-1_20261013_101530.csv
+logs/BMP280-1_cli_20261013_101530.csv
+logs/BMP280-1_gui_20261013_101531.csv
 ```
 
 The timestamp in the filename is the local system time when the stream log was opened. CSV rows contain:
@@ -542,14 +551,15 @@ A new file is created for each stream session, with the device name and session 
 The application creates a separate audit file such as:
 
 ```text
-logs/audit_20261013_101500.log
+logs/audit_cli_20261013_101500.log
+logs/audit_gui_20261013_101501.log
 ```
 
 Audit entries include timestamps for application startup/shutdown, configuration load, device selection, reads and writes initiated through menus, scan start/completion, stream start/stop, and runtime setting changes. Driver-backed operations identify the configured device, its `type`, the driver title, operation/action, success state, and result or failure stage. The audit log is separate from the device CSV stream files.
 
 Logs use local Windows system time. Protect log files appropriately if they contain sensitive operational information.
 
-At startup, the application automatically removes its timestamped audit and stream log files that meet `log_retention_days`, oldest first. Set that option to `0` to disable automatic cleanup. Choose **Clean old logs** from the main menu to enter a one-time age in days; enter `0` to cancel. The currently open audit log is retained until a later run. Cleanup only targets files using the application's timestamped `audit_*.log` and `*_YYYYMMDD_HHMMSS.csv` naming patterns.
+At startup, the application automatically removes its timestamped frontend-specific audit and stream log files that meet `log_retention_days`, oldest first. Set that option to `0` to disable automatic cleanup. Choose **Clean old logs** from the main menu to enter a one-time age in days; enter `0` to cancel. The currently open audit log is retained until a later run. Cleanup targets both legacy timestamped names and the frontend-specific `audit_<frontend>_*.log` and `*_<frontend>_YYYYMMDD_HHMMSS.csv` patterns.
 
 ## Adding another device driver
 

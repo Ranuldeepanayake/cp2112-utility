@@ -121,7 +121,9 @@ public:
     ApplicationService(const ApplicationService&) = delete;
     ApplicationService& operator=(const ApplicationService&) = delete;
 
-    bool initialize(const std::string& configPath, std::string& error);
+    // Initializes the shared service and tags log files with the frontend name.
+    bool initialize(const std::string& configPath, std::string& error,
+                    const std::string& frontendTag = "app");
     AppConfig config() const;
     bool reload(std::string& error);
     bool adapters(std::vector<AdapterInformation>& result, std::string& error);

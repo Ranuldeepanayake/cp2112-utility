@@ -121,14 +121,17 @@ std::string executableDirectory() {
     return separator == std::string::npos ? std::string{} : executablePath.substr(0, separator);
 }
 
-// Finds the default config file when the program is launched from the root or bin directory.
+// Finds the default config file when the executable is launched from the root,
+// bin\cli, or bin\gui directory. The packaged executable is two levels below
+// the project/package root.
 std::string defaultConfigPath() {
     const std::string executableDir = executableDirectory();
     const std::vector<std::string> candidates = {
         "config\\devices.ini",
         "..\\config\\devices.ini",
         executableDir + "\\config\\devices.ini",
-        executableDir + "\\..\\config\\devices.ini"
+        executableDir + "\\..\\config\\devices.ini",
+        executableDir + "\\..\\..\\config\\devices.ini"
     };
     for (const std::string& candidate : candidates) {
         if (!candidate.empty() && fileExists(candidate)) return candidate;
@@ -645,7 +648,7 @@ int main(int argc, char** argv) {
     const std::string configPath = argc > 1 ? argv[1] : defaultConfigPath();
     ApplicationService app;
     std::string error;
-    if (!app.initialize(configPath, error)) {
+    if (!app.initialize(configPath, error, "cli")) {
         std::cerr << "Application initialization failed: " << error << "\n";
         std::cerr << "Usage: cp2112_console.exe [path-to-config.ini]\n";
         return 1;

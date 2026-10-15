@@ -3,12 +3,18 @@
 # Allow callers to select another compiler while defaulting to g++ on PATH.
 CXX ?= g++
 # Build a 64-bit executable to match the Silicon Labs runtime DLLs.
-# Statically link the MinGW C++/thread runtime so the CLI can share bin/ with
-# the Qt GUI without mixing incompatible runtime DLL versions.
-CXXFLAGS ?= -m64 -static -static-libgcc -static-libstdc++ -std=c++17 -O2 -Wall -Wextra -Iinclude
+# Keep the CLI dynamically linked; its matching MinGW runtime DLLs are copied
+# into bin\cli so they cannot collide with the Qt runtime in bin\gui.
+CXXFLAGS ?= -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude
 
-# Keep the executable in bin/ so it has the same layout as release packages.
-TARGET := bin/cp2112_console.exe
+# Keep the CLI executable and its MinGW runtime files together.
+CLI_DIR := bin/cli
+TARGET := $(CLI_DIR)/cp2112_console.exe
+# Override TOOLCHAIN_BIN when the selected 64-bit MinGW installation is elsewhere.
+TOOLCHAIN_BIN ?= C:/mingw64/bin
+TOOLCHAIN_BIN_WIN := $(subst /,\,$(TOOLCHAIN_BIN))
+CLI_RUNTIME_DLLS := libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll
+CLI_OPTIONAL_RUNTIME_DLLS := libmcfgthread-2.dll
 # The icon resource is an intermediate object and must stay outside bin/.
 RESOURCE := build/app-res.o
 # List every application and device-driver translation unit compiled into the CLI.
@@ -44,9 +50,10 @@ check-toolchain:
 	where windres
 	windres --version
 
-# Create the directory that receives the final executable and runtime DLLs.
-bin:
+# Create the directory that receives the CLI executable and its runtime DLLs.
+$(CLI_DIR):
 	@if not exist "bin" mkdir "bin"
+	@if not exist "$(CLI_DIR)" mkdir "$(CLI_DIR)"
 
 # Create the directory used for runtime logs during local execution.
 logs:
@@ -60,16 +67,19 @@ $(RESOURCE): resources/app.rc resources/cp2112.ico | build-dir
 build-dir:
 	@if not exist "build" mkdir "build"
 
-# Link the C++ sources and embedded icon resource into the 64-bit executable.
-$(TARGET): $(SOURCES) $(HEADERS) $(RESOURCE) | bin logs
+# Link the C++ sources and embedded icon resource into the 64-bit executable,
+# then copy the dynamic MinGW runtime files from the selected toolchain.
+$(TARGET): $(SOURCES) $(HEADERS) $(RESOURCE) | $(CLI_DIR) logs
 	$(CXX) $(CXXFLAGS) $(SOURCES) $(RESOURCE) -o $@
+	@for %%F in ($(CLI_RUNTIME_DLLS)) do @if not exist "$(TOOLCHAIN_BIN_WIN)\%%F" (echo Required CLI runtime is missing: $(TOOLCHAIN_BIN_WIN)\%%F& exit /B 1) else if not exist "$(CLI_DIR)\%%F" copy "$(TOOLCHAIN_BIN_WIN)\%%F" "$(CLI_DIR)\%%F" >NUL
+	@for %%F in ($(CLI_OPTIONAL_RUNTIME_DLLS)) do @if exist "$(TOOLCHAIN_BIN_WIN)\%%F" if not exist "$(CLI_DIR)\%%F" copy "$(TOOLCHAIN_BIN_WIN)\%%F" "$(CLI_DIR)\%%F" >NUL
 
 # Build first, then launch the CLI with the project configuration file.
 run: build
-	$(TARGET) config\devices.ini
+	$(TARGET)
 
 # Remove locally generated executables and intermediate resource objects.
 clean:
-	@if exist "bin\*.exe" del /Q "bin\*.exe"
-	@if exist "bin\*.o" del /Q "bin\*.o"
+	@if exist "bin\cli\*.exe" del /Q "bin\cli\*.exe"
+	@if exist "bin\cli\*.o" del /Q "bin\cli\*.o"
 	@if exist "build\*.o" del /Q "build\*.o"

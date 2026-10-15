@@ -644,7 +644,7 @@ QString MainWindow::configPath() const {
 
 void MainWindow::loadConfiguration() {
     std::string error;
-    if (!app_.initialize(configPath().toStdString(), error)) {
+    if (!app_.initialize(configPath().toStdString(), error, "gui")) {
         showError(QString::fromStdString(error));
         return;
     }

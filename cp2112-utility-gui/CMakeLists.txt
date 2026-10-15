@@ -66,53 +66,66 @@ endif()
 target_link_libraries(cp2112-utility-gui PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
 target_include_directories(cp2112-utility-gui PRIVATE ${CORE_ROOT}/include)
 
-# Copy only the runtime files required by this Widgets application into the
-# repository's shared bin directory. The executable is a local build output,
-# while these DLLs are deliberate repository dependencies for packaging.
+# Copy the GUI executable and the runtime files required by this Widgets
+# application into bin\gui. Keeping these beside the executable prevents the
+# Qt MinGW runtime from colliding with the CLI MinGW runtime in bin\cli.
 if(WIN32)
-    set(SHARED_BIN_DIR "${CORE_ROOT}/bin")
+    set(GUI_BIN_DIR "${CORE_ROOT}/bin/gui")
     get_filename_component(MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     set(QT_PLATFORM_PLUGIN "${Qt${QT_VERSION_MAJOR}_DIR}/../../../plugins/platforms/qwindows.dll")
     set(MINGW_MCFGTHREAD_DLL "${MINGW_BIN_DIR}/libmcfgthread-2.dll")
     option(CP2112_SKIP_RUNTIME_COPY "Leave repository runtime DLLs unchanged for CI packaging" OFF)
     if(CP2112_SKIP_RUNTIME_COPY)
         add_custom_command(TARGET cp2112-utility-gui POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${SHARED_BIN_DIR}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${GUI_BIN_DIR}"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                     "$<TARGET_FILE:cp2112-utility-gui>"
-                    "${SHARED_BIN_DIR}/cp2112-utility-gui.exe"
-            COMMENT "Copying GUI executable to bin")
+                    "${GUI_BIN_DIR}/cp2112-utility-gui.exe"
+            COMMENT "Copying GUI executable to bin/gui")
     else()
+        # Add runtime-copy commands only for files absent from the repository.
+        # Existing tracked DLLs are never replaced by a local Qt installation.
+        set(GUI_RUNTIME_COPY_COMMANDS)
+        if(NOT EXISTS "${GUI_BIN_DIR}/Qt6Core.dll")
+            list(APPEND GUI_RUNTIME_COPY_COMMANDS COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Core>" "${GUI_BIN_DIR}/Qt6Core.dll")
+        endif()
+        if(NOT EXISTS "${GUI_BIN_DIR}/Qt6Gui.dll")
+            list(APPEND GUI_RUNTIME_COPY_COMMANDS COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Gui>" "${GUI_BIN_DIR}/Qt6Gui.dll")
+        endif()
+        if(NOT EXISTS "${GUI_BIN_DIR}/Qt6Widgets.dll")
+            list(APPEND GUI_RUNTIME_COPY_COMMANDS COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Widgets>" "${GUI_BIN_DIR}/Qt6Widgets.dll")
+        endif()
+        if(NOT EXISTS "${GUI_BIN_DIR}/libgcc_s_seh-1.dll")
+            list(APPEND GUI_RUNTIME_COPY_COMMANDS COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${MINGW_BIN_DIR}/libgcc_s_seh-1.dll" "${GUI_BIN_DIR}/libgcc_s_seh-1.dll")
+        endif()
+        if(NOT EXISTS "${GUI_BIN_DIR}/libstdc++-6.dll")
+            list(APPEND GUI_RUNTIME_COPY_COMMANDS COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${MINGW_BIN_DIR}/libstdc++-6.dll" "${GUI_BIN_DIR}/libstdc++-6.dll")
+        endif()
+        if(NOT EXISTS "${GUI_BIN_DIR}/libwinpthread-1.dll")
+            list(APPEND GUI_RUNTIME_COPY_COMMANDS COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${MINGW_BIN_DIR}/libwinpthread-1.dll" "${GUI_BIN_DIR}/libwinpthread-1.dll")
+        endif()
+        if(NOT EXISTS "${GUI_BIN_DIR}/platforms/qwindows.dll")
+            list(APPEND GUI_RUNTIME_COPY_COMMANDS COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${QT_PLATFORM_PLUGIN}" "${GUI_BIN_DIR}/platforms/qwindows.dll")
+        endif()
+        if(EXISTS "${MINGW_MCFGTHREAD_DLL}" AND NOT EXISTS "${GUI_BIN_DIR}/libmcfgthread-2.dll")
+            list(APPEND GUI_RUNTIME_COPY_COMMANDS COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${MINGW_MCFGTHREAD_DLL}" "${GUI_BIN_DIR}/libmcfgthread-2.dll")
+        endif()
         add_custom_command(TARGET cp2112-utility-gui POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${SHARED_BIN_DIR}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${SHARED_BIN_DIR}/platforms"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Core>"
-                    "${SHARED_BIN_DIR}/$<TARGET_FILE_NAME:Qt${QT_VERSION_MAJOR}::Core>"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Gui>"
-                    "${SHARED_BIN_DIR}/$<TARGET_FILE_NAME:Qt${QT_VERSION_MAJOR}::Gui>"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "$<TARGET_FILE:Qt${QT_VERSION_MAJOR}::Widgets>"
-                    "${SHARED_BIN_DIR}/$<TARGET_FILE_NAME:Qt${QT_VERSION_MAJOR}::Widgets>"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "${MINGW_BIN_DIR}/libgcc_s_seh-1.dll" "${SHARED_BIN_DIR}/libgcc_s_seh-1.dll"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "${MINGW_BIN_DIR}/libstdc++-6.dll" "${SHARED_BIN_DIR}/libstdc++-6.dll"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "${MINGW_BIN_DIR}/libwinpthread-1.dll" "${SHARED_BIN_DIR}/libwinpthread-1.dll"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "${QT_PLATFORM_PLUGIN}" "${SHARED_BIN_DIR}/platforms/qwindows.dll"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${GUI_BIN_DIR}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${GUI_BIN_DIR}/platforms"
+            ${GUI_RUNTIME_COPY_COMMANDS}
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                     "$<TARGET_FILE:cp2112-utility-gui>"
-                    "${SHARED_BIN_DIR}/cp2112-utility-gui.exe"
-            COMMENT "Copying GUI executable and required runtime files to bin")
-    endif()
-    if(EXISTS "${MINGW_MCFGTHREAD_DLL}" AND NOT CP2112_SKIP_RUNTIME_COPY)
-        add_custom_command(TARGET cp2112-utility-gui POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "${MINGW_MCFGTHREAD_DLL}" "${SHARED_BIN_DIR}/libmcfgthread-2.dll"
-            COMMENT "Copying optional MinGW MCF runtime")
+                    "${GUI_BIN_DIR}/cp2112-utility-gui.exe"
+            COMMENT "Copying missing GUI runtime files to bin/gui")
     endif()
 endif()
 

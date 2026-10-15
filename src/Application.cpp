@@ -236,6 +236,34 @@ std::string resolveRelativePath(const std::string& path, const std::string& base
     return isAbsolutePath(path) ? path : absolutePath(baseDirectory + "\\" + path);
 }
 
+// Returns the directory containing the running frontend executable.
+std::string executableDirectory() {
+    char buffer[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameA(nullptr, buffer, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return {};
+    const std::string executablePath(buffer, length);
+    const size_t separator = executablePath.find_last_of("\\/");
+    return separator == std::string::npos ? std::string{} : executablePath.substr(0, separator);
+}
+
+// Resolves the common config path and falls back beside the executable when
+// the package intentionally keeps frontend-specific copies in bin\cli or bin\gui.
+std::string resolveBridgeDll(const std::string& configuredPath, const std::string& packageDirectory) {
+    const std::string packagePath = resolveRelativePath(configuredPath, packageDirectory);
+    if (regularFileExists(packagePath)) return packagePath;
+    const size_t separator = configuredPath.find_last_of("\\/");
+    const std::string filename = separator == std::string::npos
+        ? configuredPath
+        : configuredPath.substr(separator + 1);
+    const std::string executableDir = executableDirectory();
+    const std::string executablePath = executableDir.empty()
+        ? std::string{}
+        : executableDir + "\\" + filename;
+    return !executablePath.empty() && regularFileExists(executablePath)
+        ? executablePath
+        : packagePath;
+}
+
 bool settingUnsigned(const SettingValue& value, uint64_t& result) {
     if (!std::holds_alternative<uint64_t>(value)) return false;
     result = std::get<uint64_t>(value);
@@ -289,15 +317,11 @@ bool ensureDirectory(const std::string& path, std::string& error) {
 // Recognizes the timestamped audit and stream log naming patterns.
 bool isTimestampedLog(const std::string& name) {
     const std::string filename = lower(name);
-    const bool audit = filename.size() == 6 + 15 + 4 &&
-        filename.compare(0, 6, "audit_") == 0 &&
+    const bool audit = filename.rfind("audit_", 0) == 0 &&
         filename.compare(filename.size() - 4, 4, ".log") == 0;
-    const bool stream = filename.size() >= 1 + 1 + 15 + 4 &&
-        filename.compare(filename.size() - 4, 4, ".csv") == 0;
-    if (!audit && !stream) return false;
-    const size_t timestampStart = audit ? 6 : filename.size() - 4 - 15 - 1;
-    if (stream && filename[timestampStart] != '_') return false;
-    const size_t digitsStart = audit ? timestampStart : timestampStart + 1;
+    const bool stream = filename.compare(filename.size() - 4, 4, ".csv") == 0;
+    if ((!audit && !stream) || filename.size() < 15 + 4) return false;
+    const size_t digitsStart = filename.size() - 4 - 15;
     for (size_t i = digitsStart; i < digitsStart + 15; ++i) {
         if (i == digitsStart + 8) {
             if (filename[i] != '_') return false;
@@ -376,13 +400,14 @@ ApplicationService::ApplicationService() = default;
 ApplicationService::~ApplicationService() = default;
 
 // Loads startup configuration, creates logging, validates prerequisites, and opens the CP2112 API.
-bool ApplicationService::initialize(const std::string& configPath, std::string& error) {
+bool ApplicationService::initialize(const std::string& configPath, std::string& error,
+                                    const std::string& frontendTag) {
     error.clear();
     configPath_ = absolutePath(configPath);
     AppConfig loaded;
     if (!loadConfig(configPath_, loaded, error)) return false;
     const std::string packageDirectory = packageBaseDirectory(configPath_);
-    loaded.bridgeDll = resolveRelativePath(loaded.bridgeDll, packageDirectory);
+    loaded.bridgeDll = resolveBridgeDll(loaded.bridgeDll, packageDirectory);
     loaded.logDir = resolveRelativePath(loaded.logDir, packageDirectory);
     config_ = std::move(loaded);
 
@@ -402,7 +427,7 @@ bool ApplicationService::initialize(const std::string& configPath, std::string& 
         return false;
     }
 
-    logger_ = std::make_unique<Logger>(config_.logDir);
+    logger_ = std::make_unique<Logger>(config_.logDir, frontendTag);
     if (!logger_->available()) {
         error = "Startup prerequisite warning: cannot create an audit log in '" +
                 config_.logDir + "'.";
@@ -439,7 +464,7 @@ bool ApplicationService::reload(std::string& error) {
         return false;
     }
     const std::string packageDirectory = packageBaseDirectory(configPath_);
-    loaded.bridgeDll = resolveRelativePath(loaded.bridgeDll, packageDirectory);
+    loaded.bridgeDll = resolveBridgeDll(loaded.bridgeDll, packageDirectory);
     loaded.logDir = resolveRelativePath(loaded.logDir, packageDirectory);
     bool restartRequired = false;
     size_t enabled = 0;
@@ -560,7 +585,16 @@ bool ApplicationService::updateGeneralSetting(const std::string& key, const Sett
     uint64_t number = 0;
     bool boolean = false;
     if (normalized == "bridge_dll" && settingString(value, text)) {
-        serialized = text; config_.bridgeDll = resolveRelativePath(text, packageBaseDirectory(configPath_));
+        // Keep the standard package setting portable when a frontend displays
+        // the resolved copy from bin\cli or bin\gui and saves it unchanged.
+        const std::string normalizedText = lower(text);
+        const bool isStandardBridge = normalizedText.find("slabhidtosmbus.dll") != std::string::npos &&
+            (text == config_.bridgeDll || normalizedText.find("\\bin\\cli\\") != std::string::npos ||
+             normalizedText.find("/bin/cli/") != std::string::npos ||
+             normalizedText.find("\\bin\\gui\\") != std::string::npos ||
+             normalizedText.find("/bin/gui/") != std::string::npos);
+        serialized = isStandardBridge ? "bin\\SLABHIDtoSMBus.dll" : text;
+        config_.bridgeDll = resolveBridgeDll(serialized, packageBaseDirectory(configPath_));
     } else if (normalized == "log_dir" && settingString(value, text)) {
         serialized = text; config_.logDir = resolveRelativePath(text, packageBaseDirectory(configPath_));
     } else if (normalized == "default_refresh_seconds" && settingUnsigned(value, number) && number >= 1 && number <= 3600) {
