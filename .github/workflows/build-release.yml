@@ -194,6 +194,8 @@ jobs:
           target: desktop
           arch: win64_mingw
           archives: qtbase
+          # Install the MinGW 13.1 toolchain used to build Qt 6.12 MinGW kits.
+          tools: 'tools_mingw1310,qt.tools.win64_mingw1310'
           cache: true
           # Qt 6.12 uses the newer per-architecture repository metadata layout.
           # The released PyPI aqtinstall package used by the action cannot read it.
@@ -235,12 +237,15 @@ jobs:
           # Build the GUI with the MinGW kit used to build the installed Qt DLLs.
           # The CLI uses the separately pinned WinLibs compiler and keeps its
           # dynamic runtime beside the CLI executable.
-          $qtRootParent = Split-Path $env:QT_ROOT_DIR -Parent
-          $qtCompiler = Get-ChildItem -Path (Join-Path $qtRootParent 'Tools') -Filter 'g++.exe' -Recurse -ErrorAction SilentlyContinue |
+          # QT_ROOT_DIR is ...\Qt\6.12.0\mingw_64; the action installs tools
+          # beside the version directory at ...\Qt\Tools, not below QT_ROOT_DIR.
+          $qtInstallRoot = Split-Path (Split-Path $env:QT_ROOT_DIR -Parent) -Parent
+          $qtToolsRoot = Join-Path $qtInstallRoot 'Tools'
+          $qtCompiler = Get-ChildItem -Path $qtToolsRoot -Filter 'g++.exe' -Recurse -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match 'mingw' } |
             Select-Object -First 1
           if (-not $qtCompiler) {
-            throw "Qt's bundled MinGW compiler was not found below $qtRootParent\Tools"
+            throw "Qt's bundled MinGW compiler was not found below $qtToolsRoot"
           }
           $qtCompilerBin = Split-Path $qtCompiler.FullName
           $qtCompilerTarget = (& (Join-Path $qtCompilerBin 'g++') -dumpmachine).Trim()
