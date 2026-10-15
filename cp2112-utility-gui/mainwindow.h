@@ -25,11 +25,12 @@ class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
-    struct ResultPoint { QString timestamp; QString reading; double value = 0.0; double raw = 0.0; bool hasRaw = false; };
+    struct ResultPoint { size_t deviceIndex = 0; QString timestamp; QString reading; double value = 0.0; double raw = 0.0; bool hasRaw = false; };
 
 private slots:
     void refreshAll();
     void selectDeviceRow(int row, int column);
+    void selectScannedDeviceRow(int row, int column);
     void refreshAdapterInformation();
     void showDriverInformation();
     void executeDeviceAction();
@@ -47,7 +48,10 @@ private slots:
     void clearAllLogs();
     void updateRefreshProgress();
     void filterScanResults();
-    void applyTheme(bool dark);
+    void applyTheme(const QString& theme);
+    void refreshSelectedDeviceRegisters();
+    void selectRegisterRow(int row, int column);
+    void appendRegisterLog(const QString& message);
 
 private:
     void buildUi();
@@ -55,6 +59,7 @@ private:
     void refreshAdapters();
     void refreshDevices();
     void refreshDeviceSettings();
+    void updateSelectedDeviceLabel();
     void stopWorker();
     void showMessage(const QString& message);
     void showError(const QString& message);
@@ -62,7 +67,7 @@ private:
     QString deviceValueText(const DeviceValue& value) const;
     QString deviceResultText(const DeviceResult& result) const;
     QString adapterText(const AdapterInformation& adapter) const;
-    void populateDeviceResult(const DeviceResult& result);
+    void populateDeviceResult(size_t deviceIndex, const DeviceResult& result);
 
     ApplicationService app_;
     std::thread worker_;
@@ -72,13 +77,17 @@ private:
     bool scanRunning_ = false;
     bool streamRunning_ = false;
     size_t selectedDevice_ = static_cast<size_t>(-1);
+    int selectedScanAddress_ = -1;
 
     QLabel* versionLabel_ = nullptr;
     QLabel* adapterLabel_ = nullptr;
+    QLabel* selectedDeviceLabel_ = nullptr;
     QTableWidget* deviceTable_ = nullptr;
     QTableWidget* resultTable_ = nullptr;
     QTableWidget* adapterTable_ = nullptr;
     QTableWidget* eventLog_ = nullptr;
+    QTableWidget* registerTable_ = nullptr;
+    QTableWidget* registerLog_ = nullptr;
     QTabWidget* tabs_ = nullptr;
     QPushButton* readButton_ = nullptr;
     QPushButton* streamButton_ = nullptr;
@@ -101,7 +110,9 @@ private:
     QLineEdit* registerDeviceHex_ = nullptr;
     QLineEdit* registerAddressHex_ = nullptr;
     QLineEdit* registerValueHex_ = nullptr;
+    QSpinBox* registerReadLength_ = nullptr;
     QLabel* registerResult_ = nullptr;
+    QLineEdit* registerOutput_ = nullptr;
     QPushButton* clearResultsButton_ = nullptr;
     QPushButton* chartButton_ = nullptr;
 
@@ -116,8 +127,10 @@ private:
     QSpinBox* generalRefresh_ = nullptr;
     QSpinBox* generalRetention_ = nullptr;
     QCheckBox* generalLogStream_ = nullptr;
-    QCheckBox* generalDarkMode_ = nullptr;
+    QComboBox* generalTheme_ = nullptr;
     QCheckBox* followEvents_ = nullptr;
+    QCheckBox* showDeviceRegisters_ = nullptr;
+    QCheckBox* followRegisterLog_ = nullptr;
     std::vector<ScanReading> scanReadings_;
     std::vector<ResultPoint> resultHistory_;
     QCheckBox* followLatest_ = nullptr;

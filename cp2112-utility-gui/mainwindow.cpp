@@ -28,6 +28,8 @@
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QScrollBar>
+#include <QSignalBlocker>
+#include <QSplitter>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -89,8 +91,10 @@ double numericValue(const DeviceValue& value, bool& ok) {
 
 class ChartWindow final : public QWidget {
 public:
-    explicit ChartWindow(const std::vector<MainWindow::ResultPoint>& points, QWidget* parent = nullptr)
-        : QWidget(parent), points_(points) {
+    explicit ChartWindow(const std::vector<MainWindow::ResultPoint>* points,
+                         const size_t* selectedDevice,
+                         QWidget* parent = nullptr)
+        : QWidget(parent), points_(points), selectedDevice_(selectedDevice) {
         setAttribute(Qt::WA_DeleteOnClose);
         setWindowFlags(Qt::Window | Qt::WindowTitleHint | Qt::WindowSystemMenuHint |
                        Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint |
@@ -100,13 +104,13 @@ public:
         auto* root = new QVBoxLayout(this);
         auto* controls = new QHBoxLayout();
         reading_ = new QComboBox(this);
+        reading2_ = new QComboBox(this);
         value_ = new QComboBox(this);
         interval_ = numberBox(1, 86400, 5, this);
         value_->addItems({"Processed value", "Raw value"});
-        std::set<QString> names;
-        for (const auto& point : points_) names.insert(point.reading);
-        for (const QString& name : names) reading_->addItem(name);
+        rebuildReadingOptions();
         controls->addWidget(new QLabel("Reading", this)); controls->addWidget(reading_);
+        controls->addWidget(new QLabel("Second reading", this)); controls->addWidget(reading2_);
         controls->addWidget(new QLabel("Value", this)); controls->addWidget(value_);
         controls->addWidget(new QLabel("X interval (s)", this)); controls->addWidget(interval_);
         controls->addStretch(); root->addLayout(controls);
@@ -114,9 +118,42 @@ public:
         auto* close = new QPushButton("Close", this);
         auto* closeRow = new QHBoxLayout(); closeRow->addStretch(); closeRow->addWidget(close); root->addLayout(closeRow);
         connect(close, &QPushButton::clicked, this, &QWidget::close);
-        connect(reading_, &QComboBox::currentTextChanged, this, [this] { canvas_->update(); });
-        connect(value_, &QComboBox::currentTextChanged, this, [this] { canvas_->update(); });
-        connect(interval_, qOverload<int>(&QSpinBox::valueChanged), this, [this] { canvas_->update(); });
+        connect(reading_, &QComboBox::currentTextChanged, this, [this](const QString& value) {
+            Q_UNUSED(value);
+            canvas_->update();
+        });
+        connect(reading2_, &QComboBox::currentTextChanged, this, [this](const QString& value) {
+            Q_UNUSED(value);
+            canvas_->update();
+        });
+        connect(value_, &QComboBox::currentTextChanged, this, [this](const QString&) {
+            canvas_->update();
+        });
+        connect(interval_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
+            Q_UNUSED(value);
+            canvas_->update();
+        });
+        refreshTimer_ = new QTimer(this);
+        refreshTimer_->setInterval(250);
+        connect(refreshTimer_, &QTimer::timeout, this, [this] {
+            const size_t currentDevice = currentDeviceIndex();
+            bool hasCurrentData = false;
+            if (points_) {
+                for (const auto& point : *points_) {
+                    if (point.deviceIndex == currentDevice) {
+                        hasCurrentData = true;
+                        break;
+                    }
+                }
+            }
+            const bool showingNoData = reading_->currentText() == "(No data)";
+            if (currentDevice != lastDeviceIndex_ || hasCurrentData == showingNoData) {
+                lastDeviceIndex_ = currentDevice;
+                rebuildReadingOptions();
+            }
+            canvas_->update();
+        });
+        refreshTimer_->start();
         canvas_->setAttribute(Qt::WA_OpaquePaintEvent, false);
         canvas_->installEventFilter(this);
     }
@@ -125,61 +162,89 @@ protected:
         if (watched == canvas_ && event->type() == QEvent::Paint) {
             QPainter painter(canvas_); painter.setRenderHint(QPainter::Antialiasing);
             painter.fillRect(canvas_->rect(), palette().base());
-            const QRect area = canvas_->rect().adjusted(85, 45, -35, -95);
+            const QRect area = canvas_->rect().adjusted(85, 45, -95, -95);
             painter.setPen(palette().text().color()); painter.drawRect(area);
-            const QString selected = reading_->currentText(); const bool raw = value_->currentIndex() == 1;
-            struct Sample { double seconds; double value; QString timestamp; };
-            std::vector<Sample> samples; double minimum = 0, maximum = 0; bool first = true;
+            const QString selected = reading_->currentText();
+            const QString selected2 = reading2_->currentText() == "(None)" ? QString() : reading2_->currentText();
+            const bool raw = value_->currentIndex() == 1;
+            struct Sample { double seconds; double value; };
             QDateTime firstTime;
-            for (const auto& point : points_) if (point.reading == selected && (!raw || point.hasRaw)) {
-                const double y = raw ? point.raw : point.value;
-                if (!std::isfinite(y)) continue;
+            if (!points_) { painter.drawText(area, Qt::AlignCenter, "No data source available"); return true; }
+            const size_t deviceIndex = currentDeviceIndex();
+            for (const auto& point : *points_) {
+                if (point.deviceIndex != deviceIndex ||
+                    (point.reading != selected && point.reading != selected2)) continue;
                 const QDateTime timestamp = QDateTime::fromString(point.timestamp, Qt::ISODateWithMs);
-                if (!timestamp.isValid()) continue;
-                if (!firstTime.isValid()) firstTime = timestamp;
-                if (first) minimum = maximum = y; else { minimum = std::min(minimum, y); maximum = std::max(maximum, y); }
-                samples.push_back({firstTime.msecsTo(timestamp) / 1000.0, y, point.timestamp});
-                first = false;
+                if (timestamp.isValid() && (!firstTime.isValid() || timestamp < firstTime)) firstTime = timestamp;
             }
-            painter.drawText(10, 20, selected + (raw ? " (raw)" : " (processed)"));
-            if (samples.empty()) { painter.drawText(area, Qt::AlignCenter, "No timestamped numeric points available"); return true; }
-            std::sort(samples.begin(), samples.end(), [](const Sample& left, const Sample& right) {
-                return left.seconds < right.seconds;
-            });
-            const double range = std::max(1.0, maximum - minimum);
-            minimum -= range * 0.05;
-            maximum += range * 0.05;
+            auto collect = [&](const QString& name, std::vector<Sample>& samples, double& minimum, double& maximum) {
+                bool first = true;
+                for (const auto& point : *points_)
+                    if (point.deviceIndex == deviceIndex && point.reading == name && (!raw || point.hasRaw)) {
+                    const double y = raw ? point.raw : point.value;
+                    const QDateTime timestamp = QDateTime::fromString(point.timestamp, Qt::ISODateWithMs);
+                    if (!std::isfinite(y) || !timestamp.isValid() || !firstTime.isValid()) continue;
+                    if (first) minimum = maximum = y; else { minimum = std::min(minimum, y); maximum = std::max(maximum, y); }
+                    samples.push_back({firstTime.msecsTo(timestamp) / 1000.0, y}); first = false;
+                }
+                std::sort(samples.begin(), samples.end(), [](const Sample& left, const Sample& right) { return left.seconds < right.seconds; });
+            };
+            std::vector<Sample> samples1, samples2; double minimum1 = 0, maximum1 = 0, minimum2 = 0, maximum2 = 0;
+            collect(selected, samples1, minimum1, maximum1);
+            if (!selected2.isEmpty()) collect(selected2, samples2, minimum2, maximum2);
+            painter.drawText(10, 20, QString("Blue: %1 | Green: %2").arg(selected, selected2.isEmpty() ? "(none)" : selected2));
+            if (samples1.empty() && samples2.empty()) { painter.drawText(area, Qt::AlignCenter, "No timestamped numeric data available"); return true; }
+            auto padded = [](double& minimum, double& maximum) {
+                const double range = std::max(1.0, maximum - minimum); minimum -= range * 0.05; maximum += range * 0.05;
+            };
+            if (!samples1.empty()) padded(minimum1, maximum1);
+            if (!samples2.empty()) padded(minimum2, maximum2);
             const double interval = interval_->value();
             // Keep the interval control continuous. Rounding the range to whole
             // interval multiples caused the line to jump in size at thresholds.
             const double xMaximum = 9.0 * interval;
-            const double windowStart = std::max(0.0, samples.back().seconds - xMaximum);
-            std::vector<QPointF> plot;
-            for (const Sample& sample : samples) {
-                if (sample.seconds < windowStart) continue;
-                const double x = std::clamp((sample.seconds - windowStart) / xMaximum, 0.0, 1.0);
-                const double normalized = std::clamp((sample.value - minimum) / (maximum - minimum), 0.0, 1.0);
-                plot.emplace_back(area.left() + x * area.width(), area.bottom() - normalized * area.height());
-            }
+            const double latest = std::max(samples1.empty() ? 0.0 : samples1.back().seconds,
+                                           samples2.empty() ? 0.0 : samples2.back().seconds);
+            const double windowStart = std::max(0.0, latest - xMaximum);
+            auto makePlot = [&](const std::vector<Sample>& samples, double minimum, double maximum) {
+                std::vector<QPointF> plot;
+                for (const Sample& sample : samples) {
+                    if (sample.seconds < windowStart) continue;
+                    const double x = std::clamp((sample.seconds - windowStart) / xMaximum, 0.0, 1.0);
+                    const double normalized = std::clamp((sample.value - minimum) / (maximum - minimum), 0.0, 1.0);
+                    plot.emplace_back(area.left() + x * area.width(), area.bottom() - normalized * area.height());
+                }
+                return plot;
+            };
+            const std::vector<QPointF> plot1 = makePlot(samples1, minimum1, maximum1);
+            const std::vector<QPointF> plot2 = makePlot(samples2, minimum2, maximum2);
             painter.setPen(QPen(palette().mid().color(), 1, Qt::DashLine));
             for (int tick = 0; tick < 10; ++tick) {
                 const double x = area.left() + static_cast<double>(tick) * area.width() / 9.0;
                 painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()));
             }
+            painter.setPen(palette().text().color());
             for (int tick = 0; tick < 10; ++tick) {
                 const double y = area.bottom() - static_cast<double>(tick) * area.height() / 9.0;
                 painter.drawLine(QPointF(area.left(), y), QPointF(area.right(), y));
             }
             painter.save();
             painter.setClipRect(area.adjusted(1, 1, -1, -1));
-            painter.setPen(QPen(palette().highlight().color(), 2));
-            for (size_t i = 1; i < plot.size(); ++i) painter.drawLine(plot[i - 1], plot[i]);
+            const QColor cobaltBlue(0, 71, 171); const QColor hunterGreen(53, 94, 59);
+            painter.setPen(QPen(cobaltBlue, 2));
+            for (size_t i = 1; i < plot1.size(); ++i) painter.drawLine(plot1[i - 1], plot1[i]);
+            painter.setPen(QPen(hunterGreen, 2));
+            for (size_t i = 1; i < plot2.size(); ++i) painter.drawLine(plot2[i - 1], plot2[i]);
             painter.restore();
             painter.setPen(palette().text().color());
             for (int tick = 0; tick < 10; ++tick) {
-                const double value = maximum - static_cast<double>(tick) * (maximum - minimum) / 9.0;
+                const double value = maximum1 - static_cast<double>(tick) * (maximum1 - minimum1) / 9.0;
                 const int y = area.top() + static_cast<int>(static_cast<double>(tick) * area.height() / 9.0);
-                painter.drawText(5, y + 8, QString::number(value, 'g', 5));
+                painter.setPen(cobaltBlue); painter.drawText(5, y + 8, QString::number(value, 'g', 5));
+                if (!samples2.empty()) {
+                    const double rightValue = maximum2 - static_cast<double>(tick) * (maximum2 - minimum2) / 9.0;
+                    painter.setPen(hunterGreen); painter.drawText(area.right() + 6, y + 8, QString::number(rightValue, 'g', 5));
+                }
             }
             for (int tick = 0; tick < 10; ++tick) {
                 const double seconds = static_cast<double>(tick) * xMaximum / 9.0;
@@ -194,11 +259,43 @@ protected:
         return QWidget::eventFilter(watched, event);
     }
 private:
-    std::vector<MainWindow::ResultPoint> points_;
+    size_t currentDeviceIndex() const {
+        return selectedDevice_ ? *selectedDevice_ : static_cast<size_t>(-1);
+    }
+
+    void rebuildReadingOptions() {
+        const QString previousPrimary = reading_->currentText();
+        const QString previousSecondary = reading2_->currentText();
+        std::set<QString> names;
+        const size_t deviceIndex = currentDeviceIndex();
+        if (points_) for (const auto& point : *points_)
+            if (point.deviceIndex == deviceIndex) names.insert(point.reading);
+
+        const QSignalBlocker blockPrimary(reading_);
+        const QSignalBlocker blockSecondary(reading2_);
+        reading_->clear();
+        reading2_->clear();
+        if (names.empty()) reading_->addItem("(No data)");
+        for (const QString& name : names) reading_->addItem(name);
+        reading2_->addItem("(None)");
+        for (const QString& name : names) reading2_->addItem(name);
+
+        const int primaryIndex = reading_->findText(previousPrimary);
+        if (primaryIndex >= 0) reading_->setCurrentIndex(primaryIndex);
+        else if (!names.empty()) reading_->setCurrentIndex(0);
+        const int secondaryIndex = reading2_->findText(previousSecondary);
+        reading2_->setCurrentIndex(secondaryIndex >= 0 ? secondaryIndex : 0);
+    }
+
+    const std::vector<MainWindow::ResultPoint>* points_ = nullptr;
+    const size_t* selectedDevice_ = nullptr;
+    size_t lastDeviceIndex_ = static_cast<size_t>(-1);
     QComboBox* reading_ = nullptr;
+    QComboBox* reading2_ = nullptr;
     QComboBox* value_ = nullptr;
     QSpinBox* interval_ = nullptr;
     QWidget* canvas_ = nullptr;
+    QTimer* refreshTimer_ = nullptr;
 };
 }
 
@@ -214,13 +311,13 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::buildUi() {
-    setWindowTitle("CP2112 Utility");
+    setWindowTitle("CP2112 Utility by ranuldeepanayake and AI");
     resize(1180, 760);
 
     auto* central = new QWidget(this);
     auto* root = new QVBoxLayout(central);
     auto* header = new QHBoxLayout();
-    header->addWidget(new QLabel("CP2112 Utility", central));
+    header->addWidget(new QLabel("CP2112 Utility by ranuldeepanayake and AI", central));
     header->addStretch();
     versionLabel_ = new QLabel("Build: loading...", central);
     header->addWidget(versionLabel_);
@@ -248,25 +345,38 @@ void MainWindow::buildUi() {
     deviceActions->addWidget(actionButton_);
     deviceActions->addWidget(deviceSettingsButton_);
     overviewLayout->addLayout(deviceActions);
-    deviceTable_ = makeTable({"Device", "Type", "Address", "Adapter", "Enabled", "Refresh"}, overview);
-    resultTable_ = makeTable({"Timestamp", "Reading", "Value", "Unit", "Raw value"}, overview);
+    auto* devicePane = new QWidget(overview);
+    auto* devicePaneLayout = new QVBoxLayout(devicePane);
+    deviceTable_ = makeTable({"Device", "Type", "Address", "Adapter", "Enabled", "Refresh"}, devicePane);
+    deviceTable_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    devicePaneLayout->addWidget(new QLabel("Configured devices (click a row to select)", devicePane));
+    devicePaneLayout->addWidget(deviceTable_, 1);
+
+    auto* resultPane = new QWidget(overview);
+    auto* resultPaneLayout = new QVBoxLayout(resultPane);
+    resultTable_ = makeTable({"Timestamp", "Reading", "Value", "Unit", "Raw value"}, resultPane);
     resultTable_->horizontalHeader()->setStretchLastSection(false);
     for (int column = 0; column < 5; ++column)
         resultTable_->horizontalHeader()->setSectionResizeMode(column, QHeaderView::Stretch);
-    overviewLayout->addWidget(new QLabel("Configured devices (click a row to select)", overview));
-    overviewLayout->addWidget(deviceTable_, 1);
     auto* resultHeader = new QHBoxLayout();
-    resultHeader->addWidget(new QLabel("Structured results", overview));
-    followLatest_ = new QCheckBox("Follow latest", overview);
+    resultHeader->addWidget(new QLabel("Structured results", resultPane));
+    followLatest_ = new QCheckBox("Follow latest", resultPane);
     followLatest_->setChecked(true);
     resultHeader->addStretch();
     resultHeader->addWidget(followLatest_);
-    clearResultsButton_ = new QPushButton("Clear results", overview);
-    chartButton_ = new QPushButton("Open chart", overview);
+    clearResultsButton_ = new QPushButton("Clear results", resultPane);
+    chartButton_ = new QPushButton("Open chart", resultPane);
     resultHeader->addWidget(clearResultsButton_);
     resultHeader->addWidget(chartButton_);
-    overviewLayout->addLayout(resultHeader);
-    overviewLayout->addWidget(resultTable_, 1);
+    resultPaneLayout->addLayout(resultHeader);
+    resultPaneLayout->addWidget(resultTable_, 1);
+    auto* deviceResultSplitter = new QSplitter(Qt::Vertical, overview);
+    deviceResultSplitter->addWidget(devicePane);
+    deviceResultSplitter->addWidget(resultPane);
+    deviceResultSplitter->setStretchFactor(0, 1);
+    deviceResultSplitter->setStretchFactor(1, 1);
+    deviceResultSplitter->setSizes({260, 360});
+    overviewLayout->addWidget(deviceResultSplitter, 1);
     tabs->addTab(overview, "Devices");
 
     auto* adapters = new QWidget(tabs);
@@ -285,6 +395,8 @@ void MainWindow::buildUi() {
     scanAdapter_ = numberBox(0, 255, defaults.scanAdapterIndex, scan);
     scanStart_ = numberBox(0x08, 0x77, defaults.scanStartAddress, scan);
     scanEnd_ = numberBox(0x08, 0x77, defaults.scanEndAddress, scan);
+    scanStart_->setDisplayIntegerBase(HexBase); scanStart_->setPrefix("0x");
+    scanEnd_->setDisplayIntegerBase(HexBase); scanEnd_->setPrefix("0x");
     scanClock_ = numberBox(1, 400000, defaults.scanClockHz, scan);
     scanTimeout_ = numberBox(1, 1000, defaults.transferTimeoutMs, scan);
     scanRetries_ = numberBox(0, 1000, defaults.transferRetries, scan);
@@ -292,8 +404,8 @@ void MainWindow::buildUi() {
     showUnresponsive_->setChecked(false);
     scanCountLabel_ = new QLabel("Scanned: 0 | Responded: 0", scan);
     scanForm->addRow("Adapter index", scanAdapter_);
-    scanForm->addRow("Start address", scanStart_);
-    scanForm->addRow("End address", scanEnd_);
+    scanForm->addRow("Scan start (hex)", scanStart_);
+    scanForm->addRow("Scan end (hex)", scanEnd_);
     scanForm->addRow("Clock (Hz)", scanClock_);
     scanForm->addRow("Timeout (ms)", scanTimeout_);
     scanForm->addRow("Retries", scanRetries_);
@@ -311,29 +423,61 @@ void MainWindow::buildUi() {
     scanActions->addWidget(cancelScanButton_);
     scanActions->addWidget(scanCountLabel_);
     scanLayout->addLayout(scanActions);
-    scanTable_ = makeTable({"Address", "Decimal", "Result", "Value", "Retries", "Timeout", "Status"}, scan);
+    scanTable_ = makeTable({"Address (hex)", "Address (decimal)", "Probe result", "Returned byte", "Retries used", "Timed out", "API status", "Transfer state", "Transfer detail"}, scan);
+    scanTable_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    scanTable_->horizontalHeaderItem(6)->setToolTip("Raw CP2112 API return code; 0 means the API call succeeded.");
+    scanTable_->horizontalHeaderItem(7)->setToolTip("CP2112 transfer state: 1 busy, 2 complete, 3 error.");
+    scanTable_->horizontalHeaderItem(8)->setToolTip("CP2112 detailed transfer status; the meaning depends on the transfer state.");
     scanLayout->addWidget(scanTable_, 1);
-    tabs->addTab(scan, "Scan");
+    tabs->addTab(scan, "Address Scan");
 
     auto* registers = new QWidget(tabs);
-    auto* registerLayout = new QFormLayout(registers);
+    auto* registerPageLayout = new QVBoxLayout(registers);
+    auto* registerAccess = new QWidget(registers);
+    auto* registerAccessLayout = new QVBoxLayout(registerAccess);
+    auto* registerFormWidget = new QWidget(registerAccess);
+    auto* registerLayout = new QFormLayout(registerFormWidget);
     registerDeviceHex_ = new QLineEdit("0x76", registers);
     registerAddressHex_ = new QLineEdit("0x00", registers);
     registerValueHex_ = new QLineEdit("0x00", registers);
+    registerReadLength_ = numberBox(1, 512, 1, registers);
     registerDeviceHex_->setMaximumWidth(160); registerAddressHex_->setMaximumWidth(160); registerValueHex_->setMaximumWidth(160);
     auto* readRegisterButton = new QPushButton("Read register", registers);
     auto* writeRegisterButton = new QPushButton("Write register", registers);
     readRegisterButton->setMaximumWidth(160); writeRegisterButton->setMaximumWidth(160);
     registerResult_ = new QLabel("No register operation performed.", registers);
+    registerOutput_ = new QLineEdit(registers);
+    registerOutput_->setReadOnly(true);
+    registerOutput_->setPlaceholderText("Read value or write status");
     auto* registerButtons = new QHBoxLayout();
     registerButtons->addWidget(readRegisterButton);
     registerButtons->addWidget(writeRegisterButton);
     registerLayout->addRow("Device address (hex)", registerDeviceHex_);
     registerLayout->addRow("Register address (hex)", registerAddressHex_);
+    registerLayout->addRow("Expected read bytes", registerReadLength_);
     registerLayout->addRow("Write value (hex)", registerValueHex_);
     registerLayout->addRow(registerButtons);
-    registerLayout->addRow(registerResult_);
-    tabs->addTab(registers, "Registers");
+    registerLayout->addRow("Status", registerResult_);
+    registerLayout->addRow("Output", registerOutput_);
+    registerAccessLayout->addWidget(registerFormWidget);
+    showDeviceRegisters_ = new QCheckBox("Show registers for the selected device in the Devices page", registerAccess);
+    registerTable_ = makeTable({"Address", "Name", "Access", "Description"}, registerAccess);
+    registerTable_->setVisible(false);
+    registerAccessLayout->addWidget(showDeviceRegisters_);
+    registerAccessLayout->addWidget(registerTable_, 1);
+    auto* registerLogHeader = new QHBoxLayout();
+    registerLogHeader->addWidget(new QLabel("Register operation log", registers));
+    followRegisterLog_ = new QCheckBox("Follow latest", registers); followRegisterLog_->setChecked(true);
+    registerLogHeader->addStretch(); registerLogHeader->addWidget(followRegisterLog_);
+    registerLog_ = makeTable({"Timestamp", "Status"}, registers);
+    auto* registerLogPane = new QWidget(registers);
+    auto* registerLogLayout = new QVBoxLayout(registerLogPane);
+    registerLogLayout->addLayout(registerLogHeader); registerLogLayout->addWidget(registerLog_, 1);
+    auto* registerSplitter = new QSplitter(Qt::Vertical, registers);
+    registerSplitter->addWidget(registerAccess); registerSplitter->addWidget(registerLogPane);
+    registerSplitter->setStretchFactor(0, 1); registerSplitter->setStretchFactor(1, 1);
+    registerPageLayout->addWidget(registerSplitter, 1);
+    tabs->addTab(registers, "Register Access");
 
     auto* settings = new QWidget(tabs);
     auto* settingsLayout = new QVBoxLayout(settings);
@@ -348,10 +492,16 @@ void MainWindow::buildUi() {
     generalClock_ = numberBox(1, 400000, defaults.scanClockHz, generalBox);
     generalStart_ = numberBox(0x08, 0x77, defaults.scanStartAddress, generalBox);
     generalEnd_ = numberBox(0x08, 0x77, defaults.scanEndAddress, generalBox);
+    generalStart_->setDisplayIntegerBase(HexBase); generalStart_->setPrefix("0x");
+    generalEnd_->setDisplayIntegerBase(HexBase); generalEnd_->setPrefix("0x");
     generalRefresh_ = numberBox(1, 3600, defaults.defaultRefreshSeconds, generalBox);
     generalRetention_ = numberBox(0, 36500, defaults.logRetentionDays, generalBox);
     generalLogStream_ = new QCheckBox(generalBox);
-    generalDarkMode_ = new QCheckBox("Dark mode", generalBox);
+    generalTheme_ = new QComboBox(generalBox);
+    generalTheme_->addItem("Default grey", "default");
+    generalTheme_->addItem("Light", "light");
+    generalTheme_->addItem("Dark", "dark");
+    generalTheme_->setMaximumWidth(150);
     generalLogStream_->setChecked(defaults.defaultLogStream);
     auto* bridgeRow = new QHBoxLayout();
     auto* bridgeBrowse = new QPushButton("Browse...", generalBox); bridgeBrowse->setMaximumWidth(100);
@@ -365,11 +515,11 @@ void MainWindow::buildUi() {
     generalForm->addRow("Transfer timeout (ms)", generalTimeout_);
     generalForm->addRow("Transfer retries", generalRetries_);
     generalForm->addRow("Scan clock (Hz)", generalClock_);
-    generalForm->addRow("Scan start", generalStart_);
-    generalForm->addRow("Scan end", generalEnd_);
+    generalForm->addRow("Scan start (hex)", generalStart_);
+    generalForm->addRow("Scan end (hex)", generalEnd_);
     generalForm->addRow("Default refresh (s)", generalRefresh_);
     generalForm->addRow("Default log stream", generalLogStream_);
-    generalForm->addRow("Theme", generalDarkMode_);
+    generalForm->addRow("Theme", generalTheme_);
     generalForm->addRow("Log retention (days)", generalRetention_);
     auto* saveGeneral = new QPushButton("Save general settings", generalBox);
     saveGeneral->setMaximumWidth(220);
@@ -400,6 +550,10 @@ void MainWindow::buildUi() {
 
     setCentralWidget(central);
     connect(deviceTable_, &QTableWidget::cellClicked, this, &MainWindow::selectDeviceRow);
+    connect(scanTable_, &QTableWidget::cellClicked, this, &MainWindow::selectScannedDeviceRow);
+    connect(showDeviceRegisters_, &QCheckBox::toggled, registerTable_, &QTableWidget::setVisible);
+    connect(showDeviceRegisters_, &QCheckBox::toggled, this, [this] { refreshSelectedDeviceRegisters(); });
+    connect(registerTable_, &QTableWidget::cellClicked, this, &MainWindow::selectRegisterRow);
     connect(readButton_, &QPushButton::clicked, this, &MainWindow::readSelectedDevice);
     connect(streamButton_, &QPushButton::clicked, this, &MainWindow::startStreaming);
     connect(stopStreamButton_, &QPushButton::clicked, this, &MainWindow::stopStreaming);
@@ -425,11 +579,19 @@ void MainWindow::buildUi() {
     });
     connect(showUnresponsive_, &QCheckBox::toggled, this, &MainWindow::filterScanResults);
     connect(clearResultsButton_, &QPushButton::clicked, this, [this] {
-        resultTable_->setRowCount(0); showMessage("Structured results cleared from view.");
+        const size_t deviceToClear = selectedDevice_;
+        resultHistory_.erase(std::remove_if(resultHistory_.begin(), resultHistory_.end(),
+            [deviceToClear](const ResultPoint& point) { return point.deviceIndex == deviceToClear; }),
+            resultHistory_.end());
+        resultTable_->setRowCount(0);
+        showMessage("Structured results and chart data cleared for the selected device.");
     });
     connect(chartButton_, &QPushButton::clicked, this, [this] {
-        if (resultHistory_.empty()) { showMessage("No numeric structured results are available for charting."); return; }
-        auto* chart = new ChartWindow(resultHistory_); chart->show();
+        if (selectedDevice_ == static_cast<size_t>(-1)) {
+            showMessage("Select a device before opening its chart.");
+            return;
+        }
+        auto* chart = new ChartWindow(&resultHistory_, &selectedDevice_, this); chart->show();
     });
 
     refreshTimer_ = new QTimer(this);
@@ -448,8 +610,11 @@ void MainWindow::buildUi() {
     footer->addWidget(refreshProgress_, 1);
     footer->addWidget(scanProgressLabel_);
     footer->addWidget(scanProgress_, 1);
-    footer->addStretch();
-    footer->addWidget(adapterLabel_);
+    footer->addStretch(1);
+    selectedDeviceLabel_ = new QLabel("Selected device: none", central);
+    footer->addWidget(selectedDeviceLabel_, 0, Qt::AlignCenter);
+    footer->addStretch(1);
+    footer->addWidget(adapterLabel_, 0, Qt::AlignRight);
     scanProgressLabel_->setVisible(false);
     scanProgress_->setVisible(false);
     root->addLayout(footer);
@@ -497,8 +662,9 @@ void MainWindow::loadConfiguration() {
     generalRefresh_->setValue(config.defaultRefreshSeconds);
     generalRetention_->setValue(config.logRetentionDays);
     generalLogStream_->setChecked(config.defaultLogStream);
-    generalDarkMode_->setChecked(config.darkMode);
-    applyTheme(config.darkMode);
+    const QString configuredTheme = QString::fromStdString(config.theme.empty() ? (config.darkMode ? "dark" : "default") : config.theme);
+    generalTheme_->setCurrentIndex(std::max(0, generalTheme_->findData(configuredTheme)));
+    applyTheme(configuredTheme);
     scanAdapter_->setValue(config.scanAdapterIndex);
     scanStart_->setValue(config.scanStartAddress);
     scanEnd_->setValue(config.scanEndAddress);
@@ -534,16 +700,66 @@ void MainWindow::refreshDevices() {
             QString::number(device.refreshSeconds) + " s"});
     }
     if (!config.devices.empty()) {
-        if (selectedDevice_ >= config.devices.size()) selectedDevice_ = 0;
-        deviceTable_->selectRow(static_cast<int>(selectedDevice_));
+        if (selectedDevice_ < config.devices.size())
+            deviceTable_->selectRow(static_cast<int>(selectedDevice_));
         refreshDeviceSettings();
     }
+    updateSelectedDeviceLabel();
+}
+
+void MainWindow::updateSelectedDeviceLabel() {
+    if (!selectedDeviceLabel_) return;
+    const AppConfig config = app_.config();
+    if (selectedDevice_ == static_cast<size_t>(-1) || selectedDevice_ >= config.devices.size()) {
+        selectedDeviceLabel_->setText("Selected device: none");
+        return;
+    }
+    const DeviceConfig& device = config.devices[selectedDevice_];
+    selectedDeviceLabel_->setText(QString("Selected: %1 (0x%2)")
+        .arg(QString::fromStdString(device.name))
+        .arg(device.address, 2, HexBase, QLatin1Char('0')));
 }
 
 void MainWindow::selectDeviceRow(int row, int) {
     if (row < 0 || static_cast<size_t>(row) >= app_.config().devices.size()) return;
+    if (selectedDevice_ == static_cast<size_t>(row)) {
+        selectedDevice_ = static_cast<size_t>(-1);
+        selectedScanAddress_ = -1;
+        deviceTable_->clearSelection();
+        refreshDeviceSettings();
+        updateSelectedDeviceLabel();
+        showMessage("Device selection cleared.");
+        return;
+    }
     selectedDevice_ = static_cast<size_t>(row);
+    selectedScanAddress_ = -1;
+    scanTable_->clearSelection();
     refreshDeviceSettings();
+    updateSelectedDeviceLabel();
+}
+
+void MainWindow::selectScannedDeviceRow(int row, int) {
+    if (row < 0 || !scanTable_->item(row, 0)) return;
+    QString text = scanTable_->item(row, 0)->text().trimmed();
+    if (text.startsWith("0x", Qt::CaseInsensitive)) text = text.mid(2);
+    bool ok = false;
+    const unsigned address = text.toUInt(&ok, HexBase);
+    if (!ok || address > 0x77) return;
+    const QString addressText = QString("0x%1").arg(address, 2, HexBase, QLatin1Char('0'));
+    if (selectedScanAddress_ == static_cast<int>(address)) {
+        selectedScanAddress_ = -1;
+        registerDeviceHex_->clear();
+        scanTable_->clearSelection();
+        showMessage("Scanned address selection cleared.");
+        return;
+    }
+    selectedDevice_ = static_cast<size_t>(-1);
+    deviceTable_->clearSelection();
+    registerTable_->setRowCount(0);
+    updateSelectedDeviceLabel();
+    selectedScanAddress_ = static_cast<int>(address);
+    registerDeviceHex_->setText(addressText);
+    showMessage(QString("Register Access device address set to %1.").arg(addressText));
 }
 
 void MainWindow::refreshAdapterInformation() {
@@ -575,13 +791,27 @@ void MainWindow::showDriverInformation() {
         showError(QString::fromStdString(error));
         return;
     }
-    QString text = QString::fromStdString(information.title + "\n\n" + information.capabilities);
-    if (!information.actions.empty()) {
-        text += "\n\nActions:";
-        for (const DriverAction& action : information.actions)
-            text += "\n- " + QString::fromStdString(action.label);
+    QDialog dialog(this);
+    dialog.setWindowTitle("Driver information"); dialog.resize(950, 650);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(QString::fromStdString(information.title), &dialog));
+    layout->addWidget(new QLabel(QString::fromStdString(information.capabilities), &dialog));
+    auto* table = makeTable({"Category", "Address / Action", "Access", "Purpose / Parameters"}, &dialog);
+    for (const DriverRegister& reg : information.registers) {
+        setTableRow(table, table->rowCount(), {"Register",
+            QString("0x%1 - %2").arg(reg.address, 2, HexBase, QLatin1Char('0')).arg(QString::fromStdString(reg.name)),
+            reg.readable && reg.writable ? "R/W" : reg.writable ? "W" : "R",
+            QString::fromStdString(reg.purpose)});
     }
-    QMessageBox::information(this, "Driver information", text);
+    for (const DriverAction& action : information.actions) {
+        setTableRow(table, table->rowCount(), {"Action", QString::fromStdString(action.label), "Command",
+            QString::fromStdString(action.parameters.empty() ? "No parameters" :
+                ("Parameters: " + action.parameters.front()))});
+    }
+    layout->addWidget(table, 1);
+    auto* close = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    layout->addWidget(close); connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.exec();
 }
 
 void MainWindow::executeDeviceAction() {
@@ -620,9 +850,47 @@ void MainWindow::executeDeviceAction() {
 
 void MainWindow::refreshDeviceSettings() {
     const AppConfig config = app_.config();
-    if (selectedDevice_ >= config.devices.size()) return;
+    if (selectedDevice_ >= config.devices.size()) {
+        registerDeviceHex_->clear();
+        registerTable_->setRowCount(0);
+        return;
+    }
     const DeviceConfig& device = config.devices[selectedDevice_];
     registerDeviceHex_->setText(QString("0x%1").arg(device.address, 2, HexBase, QLatin1Char('0')));
+    refreshSelectedDeviceRegisters();
+}
+
+void MainWindow::refreshSelectedDeviceRegisters() {
+    if (!registerTable_ || !showDeviceRegisters_ || !showDeviceRegisters_->isChecked()) return;
+    registerTable_->setRowCount(0);
+    if (selectedDevice_ == static_cast<size_t>(-1)) return;
+    DriverInformation information; std::string error;
+    if (!app_.driverInformation(selectedDevice_, information, error)) return;
+    for (const DriverRegister& reg : information.registers) {
+        setTableRow(registerTable_, registerTable_->rowCount(), {
+            QString("0x%1").arg(reg.address, 2, HexBase, QLatin1Char('0')),
+            QString::fromStdString(reg.name),
+            reg.readable && reg.writable ? "R/W" : reg.writable ? "W" : "R",
+            QString::fromStdString(reg.purpose)});
+    }
+}
+
+void MainWindow::selectRegisterRow(int row, int) {
+    if (row < 0 || !registerTable_ || !registerTable_->item(row, 0)) return;
+    QString text = registerTable_->item(row, 0)->text().trimmed();
+    if (text.startsWith("0x", Qt::CaseInsensitive)) text = text.mid(2);
+    bool ok = false; const uint address = text.toUInt(&ok, 16);
+    if (ok && address <= 0xFF)
+        registerAddressHex_->setText(QString("0x%1").arg(address, 2, HexBase, QLatin1Char('0')));
+}
+
+void MainWindow::appendRegisterLog(const QString& message) {
+    if (!registerLog_) return;
+    setTableRow(registerLog_, registerLog_->rowCount(),
+                {QDateTime::currentDateTime().toString(Qt::ISODateWithMs), message});
+    if (followRegisterLog_) QTimer::singleShot(0, this, [this] {
+        if (followRegisterLog_->isChecked()) registerLog_->scrollToBottom();
+    });
 }
 
 void MainWindow::readSelectedDevice() {
@@ -634,11 +902,11 @@ void MainWindow::readSelectedDevice() {
         DeviceResult result;
         std::string error;
         const bool ok = app_.readDeviceResult(index, result, error);
-        QMetaObject::invokeMethod(this, [this, result, error, ok] {
+        QMetaObject::invokeMethod(this, [this, index, result, error, ok] {
             readInProgress_.store(false);
             readButton_->setEnabled(true);
             if (!ok) showError(QString::fromStdString(error.empty() ? result.error : error));
-            populateDeviceResult(result);
+            populateDeviceResult(index, result);
         }, Qt::QueuedConnection);
     });
 }
@@ -661,7 +929,7 @@ QString MainWindow::deviceResultText(const DeviceResult& result) const {
     return values.join(", ");
 }
 
-void MainWindow::populateDeviceResult(const DeviceResult& result) {
+void MainWindow::populateDeviceResult(size_t deviceIndex, const DeviceResult& result) {
     const QString when = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
     for (const DeviceReading& reading : result.readings) {
         const QString raw = std::holds_alternative<std::monostate>(reading.raw) ? QString() : deviceValueText(reading.raw);
@@ -669,7 +937,7 @@ void MainWindow::populateDeviceResult(const DeviceResult& result) {
         bool valueOk = false, rawOk = false;
         const double value = numericValue(reading.value, valueOk);
         const double rawValue = numericValue(reading.raw, rawOk);
-        if (valueOk) resultHistory_.push_back({when, QString::fromStdString(reading.key), value, rawValue, rawOk});
+        if (valueOk) resultHistory_.push_back({deviceIndex, when, QString::fromStdString(reading.key), value, rawValue, rawOk});
     }
     if (followLatest_) QTimer::singleShot(0, this, [this] {
         if (followLatest_->isChecked()) resultTable_->scrollToBottom();
@@ -725,9 +993,9 @@ void MainWindow::startStreaming() {
     const size_t index = selectedDevice_;
     worker_ = std::thread([this, index] {
         std::string error;
-        app_.streamDeviceStructured(index, streamCancel_, [this](const std::string& when, const DeviceResult& result) {
-            QMetaObject::invokeMethod(this, [this, when, result] {
-                populateDeviceResult(result);
+        app_.streamDeviceStructured(index, streamCancel_, [this, index](const std::string& when, const DeviceResult& result) {
+            QMetaObject::invokeMethod(this, [this, index, when, result] {
+                populateDeviceResult(index, result);
                 showMessage(QString("Live poll received at %1.").arg(QString::fromStdString(when)));
             }, Qt::QueuedConnection);
         }, error);
@@ -766,6 +1034,7 @@ void MainWindow::startScan() {
     if (scanRunning_) return;
     if (worker_.joinable()) stopWorker();
     scanCancel_.store(false);
+    selectedScanAddress_ = -1;
     scanRunning_ = true;
     scanButton_->setEnabled(false);
     cancelScanButton_->setEnabled(true);
@@ -820,7 +1089,19 @@ void MainWindow::filterScanResults() {
         if (reading.readSucceeded) ++responded;
         if (!showUnresponsive_->isChecked() && !reading.readSucceeded) continue;
         const TransferDiagnostics& transfer = reading.transfer;
-        setTableRow(scanTable_, scanTable_->rowCount(), {QString("0x%1").arg(reading.address, 2, HexBase, QLatin1Char('0')), QString::number(reading.address), reading.readSucceeded ? "Device responded" : "No response", reading.readSucceeded ? QString("0x%1").arg(reading.value, 2, HexBase, QLatin1Char('0')) : QString(), QString::number(transfer.retries), transfer.timedOut ? "Yes" : "No", transfer.cancelled ? "Cancelled" : QString::number(transfer.apiStatus)});
+        const QString apiStatus = transfer.cancelled ? "Cancelled" :
+            QString("%1%2").arg(transfer.apiStatus).arg(transfer.apiStatus == CP2112_SUCCESS ? " (success)" : " (error)");
+        const QString transferState = transfer.transferState == TRANSFER_BUSY ? "Busy" :
+            transfer.transferState == TRANSFER_COMPLETE ? "Complete" :
+            transfer.transferState == TRANSFER_ERROR ? "Error" :
+            transfer.transferState == TRANSFER_IDLE ? "Idle" : QString::number(transfer.transferState);
+        setTableRow(scanTable_, scanTable_->rowCount(), {
+            QString("0x%1").arg(reading.address, 2, HexBase, QLatin1Char('0')),
+            QString::number(reading.address),
+            reading.readSucceeded ? "Device responded" : "No response",
+            reading.readSucceeded ? QString("0x%1").arg(reading.value, 2, HexBase, QLatin1Char('0')) : QString(),
+            QString::number(transfer.retries), transfer.timedOut ? "Yes" : "No", apiStatus,
+            transferState, transfer.detailedStatus < 0 ? QString("-") : QString::number(transfer.detailedStatus)});
     }
     scanCountLabel_->setText(QString("Scanned: %1 | Responded: %2").arg(scanReadings_.size()).arg(responded));
 }
@@ -828,25 +1109,35 @@ void MainWindow::filterScanResults() {
 void MainWindow::readRegister() {
     unsigned device = 0, address = 0;
     if (!parseHexField(registerDeviceHex_, 0x77, device) || !parseHexField(registerAddressHex_, 0xFF, address)) {
-        registerResult_->setStyleSheet("color: #b3261e;"); registerResult_->setText("Warning: enter valid hexadecimal device and register addresses.");
+        registerResult_->setStyleSheet("color: #b3261e;"); registerResult_->setText("Warning: invalid input"); registerOutput_->clear();
+        appendRegisterLog("WARNING: invalid read address input");
         showError("Enter valid hexadecimal device and register addresses.");
         return;
     }
-    BYTE value = 0; std::string error;
-    if (app_.readRegister(device, address, value, error)) { registerResult_->setStyleSheet("color: #16803c;"); registerResult_->setText(QString("Success: read value 0x%1 (%2)").arg(value, 2, HexBase, QLatin1Char('0')).arg(value)); }
-    else { registerResult_->setStyleSheet("color: #b3261e;"); registerResult_->setText("Warning: " + QString::fromStdString(error)); showError(QString::fromStdString(error)); }
+    std::vector<BYTE> values; std::string error;
+    if (app_.readRegister(device, address, static_cast<unsigned>(registerReadLength_->value()), values, error)) {
+        QStringList formatted;
+        for (const BYTE value : values) formatted << QString("0x%1").arg(value, 2, HexBase, QLatin1Char('0'));
+        const QString output = formatted.join(' ');
+        registerResult_->setStyleSheet("color: #16803c;");
+        registerResult_->setText(QString("Success: read %1 byte(s)").arg(values.size()));
+        registerOutput_->setText(output);
+        appendRegisterLog(QString("SUCCESS: read 0x%1, %2 byte(s): %3").arg(address, 2, HexBase, QLatin1Char('0')).arg(values.size()).arg(output));
+    }
+    else { registerResult_->setStyleSheet("color: #b3261e;"); registerResult_->setText("Warning: operation failed"); registerOutput_->setText(QString::fromStdString(error)); appendRegisterLog("WARNING: " + QString::fromStdString(error)); showError(QString::fromStdString(error)); }
 }
 
 void MainWindow::writeRegister() {
     unsigned device = 0, address = 0, value = 0;
     if (!parseHexField(registerDeviceHex_, 0x77, device) || !parseHexField(registerAddressHex_, 0xFF, address) || !parseHexField(registerValueHex_, 0xFF, value)) {
-        registerResult_->setStyleSheet("color: #b3261e;"); registerResult_->setText("Warning: enter valid hexadecimal device, register, and write values.");
+        registerResult_->setStyleSheet("color: #b3261e;"); registerResult_->setText("Warning: invalid input"); registerOutput_->clear();
+        appendRegisterLog("WARNING: invalid write address/value input");
         showError("Enter valid hexadecimal device, register, and write values.");
         return;
     }
     std::string error;
-    if (app_.writeRegister(device, address, static_cast<BYTE>(value), error)) { registerResult_->setStyleSheet("color: #16803c;"); registerResult_->setText("Success: register write completed."); }
-    else { registerResult_->setStyleSheet("color: #b3261e;"); registerResult_->setText("Warning: " + QString::fromStdString(error)); showError(QString::fromStdString(error)); }
+    if (app_.writeRegister(device, address, static_cast<BYTE>(value), error)) { registerResult_->setStyleSheet("color: #16803c;"); registerResult_->setText("Success: write completed"); registerOutput_->setText(QString("Wrote 0x%1").arg(value, 2, HexBase, QLatin1Char('0'))); appendRegisterLog(QString("SUCCESS: write 0x%1 = 0x%2").arg(address, 2, HexBase, QLatin1Char('0')).arg(value, 2, HexBase, QLatin1Char('0'))); }
+    else { registerResult_->setStyleSheet("color: #b3261e;"); registerResult_->setText("Warning: operation failed"); registerOutput_->setText(QString::fromStdString(error)); appendRegisterLog("WARNING: " + QString::fromStdString(error)); showError(QString::fromStdString(error)); }
 }
 
 void MainWindow::saveGeneralSettings() {
@@ -861,8 +1152,8 @@ void MainWindow::saveGeneralSettings() {
     }
     for (const Update& update : numeric) if (!app_.updateGeneralSetting(update.key, update.value, error)) { showError(QString::fromStdString(error)); return; }
     if (!app_.updateGeneralSetting("default_log_stream", generalLogStream_->isChecked(), error)) { showError(QString::fromStdString(error)); return; }
-    if (!app_.updateGeneralSetting("dark_mode", generalDarkMode_->isChecked(), error)) { showError(QString::fromStdString(error)); return; }
-    applyTheme(generalDarkMode_->isChecked());
+    if (!app_.updateGeneralSetting("theme", generalTheme_->currentData().toString().toStdString(), error)) { showError(QString::fromStdString(error)); return; }
+    applyTheme(generalTheme_->currentData().toString());
     showMessage("General settings saved.");
 }
 
@@ -920,8 +1211,9 @@ void MainWindow::reloadConfiguration() {
     generalRefresh_->setValue(config.defaultRefreshSeconds);
     generalRetention_->setValue(config.logRetentionDays);
     generalLogStream_->setChecked(config.defaultLogStream);
-    generalDarkMode_->setChecked(config.darkMode);
-    applyTheme(config.darkMode);
+    const QString configuredTheme = QString::fromStdString(config.theme.empty() ? (config.darkMode ? "dark" : "default") : config.theme);
+    generalTheme_->setCurrentIndex(std::max(0, generalTheme_->findData(configuredTheme)));
+    applyTheme(configuredTheme);
     refreshAll();
     showMessage("Configuration reloaded.");
 }
@@ -952,10 +1244,17 @@ void MainWindow::showMessage(const QString& message) {
     statusBar()->showMessage(message, 8000);
 }
 
-void MainWindow::applyTheme(bool dark) {
+void MainWindow::applyTheme(const QString& theme) {
     qApp->setStyle("Fusion");
-    if (!dark) { qApp->setPalette(qApp->style()->standardPalette()); return; }
+    if (theme == "default") { qApp->setPalette(qApp->style()->standardPalette()); return; }
     QPalette palette;
+    if (theme == "light") {
+        palette.setColor(QPalette::Window, QColor(245, 245, 245)); palette.setColor(QPalette::WindowText, QColor(25, 25, 25));
+        palette.setColor(QPalette::Base, Qt::white); palette.setColor(QPalette::AlternateBase, QColor(235, 235, 235));
+        palette.setColor(QPalette::Text, QColor(25, 25, 25)); palette.setColor(QPalette::Button, QColor(235, 235, 235));
+        palette.setColor(QPalette::ButtonText, QColor(25, 25, 25)); palette.setColor(QPalette::Highlight, QColor(42, 130, 218));
+        palette.setColor(QPalette::HighlightedText, Qt::white); qApp->setPalette(palette); return;
+    }
     palette.setColor(QPalette::Window, QColor(36, 36, 36)); palette.setColor(QPalette::WindowText, Qt::white);
     palette.setColor(QPalette::Base, QColor(28, 28, 28)); palette.setColor(QPalette::AlternateBase, QColor(45, 45, 45));
     palette.setColor(QPalette::Text, Qt::white); palette.setColor(QPalette::Button, QColor(55, 55, 55));

@@ -62,6 +62,7 @@ Each driver is a separate C++ translation unit:
 - `drivers/BH1750.cpp`
 - `drivers/DS3231.cpp`
 - `drivers/BQ4050.cpp`
+- `drivers/24C32BN.cpp`
 
 Each driver implements the common interface declared in `include/DeviceDriver.h`. Drivers expose metadata and callable actions, with arguments and confirmation prompts described as data; they contain no CLI input or output. The interface includes:
 
@@ -98,7 +99,8 @@ cp2112-device-console/
 │   ├── MPU6050.cpp
 │   ├── BH1750.cpp
 │   ├── DS3231.cpp
-│   └── BQ4050.cpp
+│   ├── BQ4050.cpp
+│   └── 24C32BN.cpp
 ├── include/
 │   ├── Application.h
 │   ├── AppTypes.h
@@ -145,6 +147,16 @@ If PowerShell reports that `g++` is not recognized, install 64-bit MinGW-w64 and
 - A USB cable and port that work with the adapter.
 
 Windows normally supplies the USB HID class driver used by CP2112. The application still requires the Silicon Labs user-space API DLLs.
+
+## Credits and third-party notices
+
+The application is presented as **CP2112 Utility by ranuldeepanayake and AI**. It is a non-commercial personal/project utility, but non-commercial use does not automatically remove third-party license obligations.
+
+- The Windows build uses a 64-bit MinGW-w64 toolchain. Review and retain the license notices supplied with the selected WinLibs/MinGW-w64 distribution and its runtime DLLs.
+- The Qt GUI uses Qt 6 Widgets. Qt licensing depends on the Qt package and edition used; retain the applicable Qt license and notices when redistributing the GUI and its Qt DLLs. The project source itself does not modify Qt.
+- The CP2112 runtime DLLs (`SLABHIDtoSMBus.dll` and `SLABHIDDevice.dll`) are Silicon Labs components and remain subject to Silicon Labs' terms. They are not project-authored code.
+
+For any release package, include the license files/notices that accompany the exact MinGW-w64, Qt, and Silicon Labs packages used to create that package. This README provides attribution guidance; it is not a substitute for the bundled third-party license texts.
 
 ## Obtain the Silicon Labs SDK files
 
@@ -201,7 +213,7 @@ New-Item -ItemType Directory -Force bin, logs
 ```powershell
 New-Item -ItemType Directory -Force build, bin, logs
 windres resources\app.rc -O coff -o build\app-res.o
-g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp build\app-res.o -o bin\cp2112_console.exe
+g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp drivers\24C32BN.cpp build\app-res.o -o bin\cp2112_console.exe
 ```
 
 The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
@@ -285,7 +297,7 @@ The main menu provides these options:
 3. **Adapter information** — enumerate detected adapters and read their current part number, part version, USB VID/PID, USB release, manufacturer/product/serial strings, SMBus library version, HID library version, stored USB configuration (VID/PID, release, power, and power mode), configuration lock bits, and active SMBus settings (bus speed, target address, timeouts, retries, automatic read response, and SCL-low timeout). This menu is read-only; it does not change persistent USB configuration.
 4. **Reload configuration** — reread device definitions and scan defaults from the configuration file. Changes to `bridge_dll` or `log_dir` still require restarting.
 5. **Scan I²C addresses** — scan the configured address range and bus clock, or enter overrides. Progress shows each 7-bit device address in hexadecimal and decimal. Press Enter at a scan prompt to accept its configured default. Press `Q` or `Esc` during a scan to cancel the active CP2112 transfer; the final output includes raw API status, transfer state, detailed status, retries, byte count, timeout, and cancellation fields.
-6. **Direct register read/write** — send a one-byte read or write command to a selected I²C device and register address.
+6. **Direct register read/write** — send a read or write command to a selected I²C device and register address. Register Access supports an expected read length of 1–512 bytes; the default is one byte. Returned bytes are shown as a copyable hexadecimal stream. The expected length is required for bounded SMBus transfers so the CP2112 can complete the read correctly. Writes remain one byte at a time.
 7. **Clean old logs** — interactively delete application logs older than a specified number of days.
 8. **Settings** — update validated general and device-specific settings and persist them to `config/devices.ini`.
 0. **Exit** — close the application.
@@ -357,6 +369,15 @@ refresh_seconds=5
 log_stream=true
 enabled=true
 
+[device 24C32BN-1]
+type=24c32bn
+address=0x57
+clock_hz=100000
+adapter_index=0
+refresh_seconds=5
+log_stream=true
+enabled=false
+
 [device BQ4050-1]
 type=bq4050
 address=0x0B
@@ -377,6 +398,7 @@ enabled=false
 | `build_number` | CI pipeline run number embedded in the CLI build label | Default: `0`; unchanged by local builds |
 | `beta` | Whether the package is a beta build | Default: `false`; updated only in CI packages |
 | `dark_mode` | GUI theme persisted in the configuration file | `true` or `false`; default `false` |
+| `theme` | GUI theme selection | `default`, `light`, or `dark`; default `default` |
 | `default_refresh_seconds` | Default interval applied to device entries that do not override it | 1–3600; default `2` |
 | `default_log_stream` | Default stream logging choice for device entries | `true` or `false`; default `true` |
 | `scan_adapter_index` | Default CP2112 adapter used for scans; can be overridden at the scan prompt | 0–255; default `0` |
@@ -392,7 +414,7 @@ enabled=false
 | Key | Meaning | Accepted values / default |
 |---|---|---|
 | Section name | Friendly name used in menus and log filenames | Example: `[device BMP280-1]` |
-| `type` | Selects the compiled-in driver | `bmp280`, `mpu6050`, `bh1750`, `ds3231`, `bq4050` |
+| `type` | Selects the compiled-in driver | `bmp280`, `mpu6050`, `bh1750`, `ds3231`, `bq4050`, `24c32bn` |
 | `address` | 7-bit I²C target address | Decimal or hexadecimal, e.g. `104` or `0x68`; normally `0x08`–`0x77` |
 | `clock_hz` | Requested bus clock | 1–400000 Hz; default `100000` |
 | `adapter_index` | CP2112 adapter index | Usually `0` when one adapter is attached |
@@ -414,6 +436,7 @@ These are common defaults; the actual address depends on the part and board stra
 | MPU-6050 | `0x68` or `0x69` |
 | BH1750 | `0x23` or `0x5C` |
 | DS3231 | `0x68` |
+| 24C32BN / AT24C32 EEPROM | `0x50`–`0x57` depending on address straps; `0x57` is common on DS3231 modules |
 | TI BQ4050 | `0x0B` (default Smart Battery address) |
 
 **Address conflict:** MPU-6050 and DS3231 commonly both use `0x68`. Two devices at the same address cannot normally share the same bus. Use a different valid address strap where supported, a separate adapter/bus, or an I²C multiplexer. The sample configuration disables the MPU-6050 for this reason. If AD0 is high, the MPU-6050 commonly responds at `0x69`.
@@ -457,6 +480,16 @@ Measurement duration and conversion behavior can vary by selected mode and senso
 - Allows writing the control register (`0x0E`).
 
 The date/time input uses basic range checks; it does not fully validate month lengths or leap years. Verify the resulting RTC time after a write. Writing the RTC changes the device's stored clock.
+
+### 24C32BN / AT24C32 EEPROM
+
+- Reports static device capabilities through the structured driver result: 4096-byte capacity, 32-byte page size, 16-bit memory addresses, configured I²C address, and the lack of an ID or software-reset command.
+- Reads individual bytes and bounded streams of 1–512 bytes.
+- Writes individual bytes and arbitrary byte streams, splitting writes at 32-byte page boundaries and waiting for the EEPROM write cycle between pages.
+- Verifies a byte stream without modifying memory.
+- The driver does not expose a reset action because the 24C32BN has no software reset command. Power cycling or a hardware reset is required when applicable.
+
+The sample `24C32BN-1` configuration entry is disabled by default. Many DS3231 modules include an AT24C32 EEPROM at `0x57`; confirm the EEPROM is fitted and its address straps before enabling it.
 
 ### TI BQ4050
 

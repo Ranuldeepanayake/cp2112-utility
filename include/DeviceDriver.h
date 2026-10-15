@@ -18,6 +18,14 @@ struct DriverAction {
     std::string confirmation;
 };
 
+struct DriverRegister {
+    unsigned address = 0;
+    std::string name;
+    std::string purpose;
+    bool readable = true;
+    bool writable = false;
+};
+
 // A typed scalar value keeps the device model useful to GUI and API clients
 // without requiring them to parse the CLI's formatted display text.
 using DeviceValue = std::variant<std::monostate, int64_t, uint64_t, double, bool, std::string>;
@@ -77,6 +85,7 @@ struct Driver {
     }
     virtual std::string capabilities() const = 0;
     virtual std::vector<DriverAction> actions() const = 0;
+    virtual std::vector<DriverRegister> registers() const { return {}; }
     virtual bool executeAction(Bus& bus, const DeviceConfig& d,
                                const std::string& action,
                                const std::vector<std::string>& parameters,

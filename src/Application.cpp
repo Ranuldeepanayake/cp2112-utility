@@ -96,6 +96,9 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
             else if (key == "build_number" && !value.empty()) config.buildNumber = value;
             else if (key == "beta" && parseBool(value, boolean)) config.betaBuild = boolean;
             else if (key == "dark_mode" && parseBool(value, boolean)) config.darkMode = boolean;
+            else if (key == "theme" && (lower(value) == "default" || lower(value) == "light" || lower(value) == "dark")) {
+                config.theme = lower(value); config.darkMode = config.theme == "dark";
+            }
             else if (key == "default_refresh_seconds" && parseUnsigned(value, number) && number >= 1 && number <= 3600)
                 config.defaultRefreshSeconds = static_cast<unsigned>(number);
             else if (key == "default_log_stream" && parseBool(value, boolean))
@@ -164,7 +167,7 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
         names[normalizedName] = true;
         if (device.type != "bmp280" && device.type != "mpu6050" &&
             device.type != "bh1750" && device.type != "ds3231" &&
-            device.type != "bq4050") {
+            device.type != "bq4050" && device.type != "24c32bn") {
             error = "Unsupported device type '" + device.type + "' for " + device.name;
             return false;
         }
@@ -559,7 +562,10 @@ bool ApplicationService::updateGeneralSetting(const std::string& key, const Sett
     } else if (normalized == "default_log_stream" && settingBoolean(value, boolean)) {
         serialized = boolean ? "true" : "false"; config_.defaultLogStream = boolean;
     } else if (normalized == "dark_mode" && settingBoolean(value, boolean)) {
-        serialized = boolean ? "true" : "false"; config_.darkMode = boolean;
+        serialized = boolean ? "true" : "false"; config_.darkMode = boolean; config_.theme = boolean ? "dark" : "default";
+    } else if (normalized == "theme" && settingString(value, text) &&
+               (lower(text) == "default" || lower(text) == "light" || lower(text) == "dark")) {
+        serialized = lower(text); config_.theme = serialized; config_.darkMode = serialized == "dark";
     } else if (normalized == "scan_adapter_index" && settingUnsigned(value, number) && number <= 255) {
         serialized = std::to_string(number); config_.scanAdapterIndex = static_cast<unsigned>(number);
     } else if (normalized == "scan_start_address" && settingUnsigned(value, number) && number >= 0x08 && number <= config_.scanEndAddress) {
@@ -752,6 +758,7 @@ bool ApplicationService::driverInformation(size_t deviceIndex, DriverInformation
     result.title = driver->title();
     result.capabilities = driver->capabilities();
     result.actions = driver->actions();
+    result.registers = driver->registers();
     return true;
 }
 
@@ -778,40 +785,56 @@ bool ApplicationService::executeDeviceAction(size_t deviceIndex, const std::stri
     return succeeded;
 }
 
-// Reads one byte from a register using the scan adapter and configured timeout.
+// Reads a bounded response from an arbitrary register using the scan adapter.
+// The requested length is part of the transfer contract: CP2112 uses it to
+// complete the SMBus read and generate the final bus response condition.
 bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerAddress,
-                                      BYTE& value, std::string& error) {
+                                      unsigned expectedBytes, std::vector<BYTE>& values,
+                                      std::string& error) {
     error.clear();
+    values.clear();
+    const auto auditFailure = [this](const std::string& detail) {
+        if (logger_) logger_->audit("Direct register read failed: " + detail);
+    };
     if (!initialized_) { error = "Application service is not initialized"; return false; }
     const AppConfig config = this->config();
-    if (deviceAddress < 0x08 || deviceAddress > 0x77 || registerAddress > 0xFF) {
-        error = "Device address must be 0x08..0x77 and register address must be 0x00..0xFF";
-        return false;
+    if (deviceAddress < 0x08 || deviceAddress > 0x77 || registerAddress > 0xFF ||
+        expectedBytes < 1 || expectedBytes > 512) {
+        error = "Device address must be 0x08..0x77, register address 0x00..0xFF, and expected bytes 1..512";
+        auditFailure(error); return false;
     }
     AppLockGuard hardwareLock(hardwareMutex_);
     if (config.scanAdapterIndex >= adapterCount_) {
         error = "No CP2112 adapter is connected at the configured adapter index";
-        return false;
+        auditFailure(error); return false;
     }
     DeviceHandle handle(api_);
     const Status status = api_.open(handle.address(), config.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID);
     if (status != 0 || !handle.get()) {
         error = "Could not open adapter for direct read; status=" + std::to_string(status);
-        return false;
+        auditFailure(error); return false;
     }
     Bus bus(api_, handle.get(), config.transferTimeoutMs, config.transferRetries);
     if (!bus.setClock(config.scanClockHz)) {
         error = "Failed to set bus clock for direct read";
-        return false;
+        auditFailure(error); return false;
     }
-    std::vector<BYTE> data;
-    if (!bus.read(deviceAddress, registerAddress, 1, 1, data) || data.empty()) {
+    if (!bus.read(deviceAddress, registerAddress, 1, expectedBytes, values) || values.empty()) {
         error = "Read failed at device " + hex(deviceAddress) + ", register " + hex(registerAddress);
-        return false;
+        auditFailure(error); return false;
     }
-    value = data.front();
     if (logger_) logger_->audit("Direct register read device=" + hex(deviceAddress) +
-                               " register=" + hex(registerAddress) + " value=" + hex(value));
+                               " register=" + hex(registerAddress) +
+                               " bytes=" + std::to_string(values.size()));
+    return true;
+}
+
+// Compatibility wrapper for the CLI's existing one-byte register command.
+bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerAddress,
+                                      BYTE& value, std::string& error) {
+    std::vector<BYTE> values;
+    if (!readRegister(deviceAddress, registerAddress, 1, values, error)) return false;
+    value = values.front();
     return true;
 }
 
@@ -819,31 +842,34 @@ bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerA
 bool ApplicationService::writeRegister(unsigned deviceAddress, unsigned registerAddress,
                                        BYTE value, std::string& error) {
     error.clear();
+    const auto auditFailure = [this](const std::string& detail) {
+        if (logger_) logger_->audit("Direct register write failed: " + detail);
+    };
     if (!initialized_) { error = "Application service is not initialized"; return false; }
     const AppConfig config = this->config();
     if (deviceAddress < 0x08 || deviceAddress > 0x77 || registerAddress > 0xFF) {
         error = "Device address must be 0x08..0x77 and register address must be 0x00..0xFF";
-        return false;
+        auditFailure(error); return false;
     }
     AppLockGuard hardwareLock(hardwareMutex_);
     if (config.scanAdapterIndex >= adapterCount_) {
         error = "No CP2112 adapter is connected at the configured adapter index";
-        return false;
+        auditFailure(error); return false;
     }
     DeviceHandle handle(api_);
     const Status status = api_.open(handle.address(), config.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID);
     if (status != 0 || !handle.get()) {
         error = "Could not open adapter for direct write; status=" + std::to_string(status);
-        return false;
+        auditFailure(error); return false;
     }
     Bus bus(api_, handle.get(), config.transferTimeoutMs, config.transferRetries);
     if (!bus.setClock(config.scanClockHz)) {
         error = "Failed to set bus clock for direct write";
-        return false;
+        auditFailure(error); return false;
     }
     if (!bus.writeReg(deviceAddress, static_cast<BYTE>(registerAddress), value)) {
         error = "Write failed at device " + hex(deviceAddress) + ", register " + hex(registerAddress);
-        return false;
+        auditFailure(error); return false;
     }
     if (logger_) logger_->audit("Direct register write device=" + hex(deviceAddress) +
                                " register=" + hex(registerAddress) + " value=" + hex(value));

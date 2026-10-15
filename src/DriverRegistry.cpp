@@ -8,5 +8,6 @@ std::unique_ptr<Driver> makeDriver(const std::string& type) {
     if (type == "bh1750") return makeBh1750Driver();
     if (type == "ds3231") return makeDs3231Driver();
     if (type == "bq4050") return makeBq4050Driver();
+    if (type == "24c32bn") return make24c32bnDriver();
     return nullptr;
 }

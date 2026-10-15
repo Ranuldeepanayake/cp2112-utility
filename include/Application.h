@@ -20,6 +20,7 @@ struct AppConfig {
     std::string buildNumber = "0";
     bool betaBuild = false;
     bool darkMode = false;
+    std::string theme = "default";
     unsigned defaultRefreshSeconds = 2;
     bool defaultLogStream = true;
     unsigned scanAdapterIndex = 0;
@@ -98,6 +99,7 @@ struct DriverInformation {
     std::string title;
     std::string capabilities;
     std::vector<DriverAction> actions;
+    std::vector<DriverRegister> registers;
 };
 
 struct LogCleanupResult {
@@ -130,6 +132,9 @@ public:
     bool executeDeviceAction(size_t deviceIndex, const std::string& action,
                              const std::vector<std::string>& parameters,
                              std::string& result, std::string& error);
+    bool readRegister(unsigned deviceAddress, unsigned registerAddress,
+                      unsigned expectedBytes, std::vector<BYTE>& values,
+                      std::string& error);
     bool readRegister(unsigned deviceAddress, unsigned registerAddress,
                       BYTE& value, std::string& error);
     bool writeRegister(unsigned deviceAddress, unsigned registerAddress,

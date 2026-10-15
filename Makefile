@@ -18,7 +18,8 @@ SOURCES := \
 	drivers/MPU6050.cpp \
 	drivers/BH1750.cpp \
 	drivers/DS3231.cpp \
-	drivers/BQ4050.cpp
+	drivers/BQ4050.cpp \
+	drivers/24C32BN.cpp
 # Rebuild when a public header changes.
 HEADERS := $(wildcard include/*.h)
 

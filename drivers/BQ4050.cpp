@@ -88,6 +88,18 @@ struct Bq4050Driver : Driver {
     std::string capabilities() const override {
         return "Read SBS telemetry, BQ4050 protection/status flags, per-cell measurements and temperatures; confirmed LED display test commands";
     }
+    std::vector<DriverRegister> registers() const override {
+        return {{0x03, "BATTERY_MODE", "Battery operating and capacity mode", true, false},
+                {0x08, "TEMPERATURE", "Battery temperature", true, false},
+                {0x09, "VOLTAGE", "Pack voltage", true, false},
+                {0x0A, "CURRENT", "Signed pack current", true, false},
+                {0x0D, "RELATIVE_SOC", "Relative state of charge", true, false},
+                {0x0F, "REMAINING_CAPACITY", "Remaining capacity", true, false},
+                {0x10, "FULL_CHARGE_CAPACITY", "Full charge capacity", true, false},
+                {0x16, "BATTERY_STATUS", "Battery status flags", true, false},
+                {0x17, "CYCLE_COUNT", "Charge cycle count", true, false},
+                {0x23, "MANUFACTURER_DATA", "Manufacturer subcommand response data", true, true}};
+    }
 
     bool readResult(Bus& bus, const DeviceConfig& d, DeviceResult& result) override {
         unsigned batteryMode = 0, temperature = 0, voltage = 0, current = 0, relativeSoc = 0;

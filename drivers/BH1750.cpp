@@ -7,6 +7,13 @@
 struct Bh1750Driver : Driver {
     std::string title() const override { return "BH1750 illuminance sensor"; }
     std::string capabilities() const override { return "Trigger high-resolution measurement; read lux; set power and measurement mode"; }
+    std::vector<DriverRegister> registers() const override {
+        return {{0x01, "POWER_ON", "Power-on command", false, true},
+                {0x10, "CONT_H_RES", "Continuous high-resolution measurement command", false, true},
+                {0x00, "POWER_DOWN", "Power-down command", false, true},
+                {0x07, "RESET", "Reset measurement data register", false, true},
+                {0x00, "DATA", "Two-byte raw illuminance response (command-based)", true, false}};
+    }
 
     bool readResult(Bus& bus, const DeviceConfig& d, DeviceResult& result) override {
         if (!bus.writeCommand(d.address, 0x01)) { result.error = "power-on command failed"; return false; }

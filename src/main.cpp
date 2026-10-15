@@ -660,7 +660,7 @@ int main(int argc, char** argv) {
     std::cout << "Version: " << versionString(app.config()) << "\n";
 
     while (true) {
-        std::cout << "\n========== CP2112 Device Console " << versionString(app.config()) << " ==========\n"
+        std::cout << "\n========== CP2112 Utility by ranuldeepanayake and AI " << versionString(app.config()) << " ==========\n"
                   << "1 List configured devices\n2 Select device\n3 Adapter information\n"
                   << "4 Reload configuration\n5 Scan I2C addresses\n"
                   << "6 Direct register read/write\n7 Clean old logs\n8 Settings\n0 Exit\n> ";

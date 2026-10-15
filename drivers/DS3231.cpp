@@ -7,6 +7,11 @@
 struct Ds3231Driver : Driver {
     std::string title() const override { return "DS3231 RTC"; }
     std::string capabilities() const override { return "Read clock/date and temperature; set RTC date/time; write control register"; }
+    std::vector<DriverRegister> registers() const override {
+        return {{0x00, "TIME", "Seconds through year clock/calendar block", true, true},
+                {0x0E, "CONTROL", "RTC control register", true, true},
+                {0x11, "TEMP", "Signed temperature measurement block", true, false}};
+    }
 
     bool readResult(Bus& bus, const DeviceConfig& d, DeviceResult& result) override {
         std::vector<BYTE> time, temperature;
