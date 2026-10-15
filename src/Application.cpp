@@ -23,6 +23,12 @@ std::string lower(std::string value) {
     return value;
 }
 
+// Gives every driver-backed audit entry a stable device and driver identity.
+std::string driverAuditContext(const DeviceConfig& device, const Driver& driver) {
+    return "device=\"" + device.name + "\" type=" + device.type +
+           " driver=\"" + driver.title() + "\"";
+}
+
 // Parses decimal or hexadecimal unsigned configuration values.
 bool parseUnsigned(const std::string& text, unsigned long& value) {
     try {
@@ -167,7 +173,7 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
         names[normalizedName] = true;
         if (device.type != "bmp280" && device.type != "mpu6050" &&
             device.type != "bh1750" && device.type != "ds3231" &&
-            device.type != "bq4050" && device.type != "24c32bn") {
+            device.type != "bq4050" && device.type != "24c32bn" && device.type != "ssd1306") {
             error = "Unsupported device type '" + device.type + "' for " + device.name;
             return false;
         }
@@ -724,18 +730,31 @@ bool ApplicationService::readDeviceResult(size_t deviceIndex, DeviceResult& resu
     result = {};
     DeviceConfig device;
     if (!getDevice(deviceIndex, device, error)) return false;
+    std::unique_ptr<Driver> driver = makeDriver(device.type);
+    if (!driver) {
+        error = "No driver registered for " + device.type;
+        if (logger_) logger_->audit("Driver-backed read failed device=\"" + device.name +
+                                    "\" type=" + device.type + " reason=\"" + error + "\"");
+        return false;
+    }
     AppLockGuard hardwareLock(hardwareMutex_);
     DeviceHandle handle(api_);
-    if (!openDevice(device, *handle.address(), error)) return false;
+    if (!openDevice(device, *handle.address(), error)) {
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=read succeeded=false stage=open error=\"" + error + "\"");
+        return false;
+    }
     Bus bus(api_, handle.get(), config_.transferTimeoutMs, config_.transferRetries);
     if (!bus.setClock(device.clock)) {
         error = "Failed to set bus clock for " + device.name;
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=read succeeded=false stage=configure error=\"" + error + "\"");
         return false;
     }
-    std::unique_ptr<Driver> driver = makeDriver(device.type);
-    if (!driver) { error = "No driver registered for " + device.type; return false; }
     const bool succeeded = driver->readResult(bus, device, result);
-    if (logger_) logger_->audit(device.name + ": " + formatDeviceResult(result));
+    if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                               " operation=read succeeded=" + (succeeded ? "true" : "false") +
+                               " result=\"" + formatDeviceResult(result) + "\"");
     return succeeded;
 }
 
@@ -770,18 +789,35 @@ bool ApplicationService::executeDeviceAction(size_t deviceIndex, const std::stri
     result.clear();
     DeviceConfig device;
     if (!getDevice(deviceIndex, device, error)) return false;
+    std::unique_ptr<Driver> driver = makeDriver(device.type);
+    if (!driver) {
+        error = "No driver registered for " + device.type;
+        if (logger_) logger_->audit("Driver-backed action failed device=\"" + device.name +
+                                    "\" type=" + device.type + " action=" + action +
+                                    " reason=\"" + error + "\"");
+        return false;
+    }
     AppLockGuard hardwareLock(hardwareMutex_);
     DeviceHandle handle(api_);
-    if (!openDevice(device, *handle.address(), error)) return false;
+    if (!openDevice(device, *handle.address(), error)) {
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=action action=" + action +
+                                   " succeeded=false stage=open error=\"" + error + "\"");
+        return false;
+    }
     Bus bus(api_, handle.get(), config_.transferTimeoutMs, config_.transferRetries);
     if (!bus.setClock(device.clock)) {
         error = "Failed to set bus clock for " + device.name;
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=action action=" + action +
+                                   " succeeded=false stage=configure error=\"" + error + "\"");
         return false;
     }
-    std::unique_ptr<Driver> driver = makeDriver(device.type);
-    if (!driver) { error = "No driver registered for " + device.type; return false; }
     const bool succeeded = driver->executeAction(bus, device, action, parameters, result);
-    if (logger_) logger_->audit(device.name + ": " + result);
+    if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                               " operation=action action=" + action +
+                               " succeeded=" + (succeeded ? "true" : "false") +
+                               " result=\"" + result + "\"");
     return succeeded;
 }
 
@@ -883,26 +919,38 @@ bool ApplicationService::streamDeviceStructured(size_t deviceIndex, std::atomic<
     error.clear();
     DeviceConfig device;
     if (!getDevice(deviceIndex, device, error)) return false;
+    std::unique_ptr<Driver> driver = makeDriver(device.type);
+    if (!driver) {
+        error = "No driver registered for " + device.type;
+        if (logger_) logger_->audit("Driver-backed stream failed device=\"" + device.name +
+                                    "\" type=" + device.type + " reason=\"" + error + "\"");
+        return false;
+    }
     AppLockGuard hardwareLock(hardwareMutex_);
     DeviceHandle handle(api_);
-    if (!openDevice(device, *handle.address(), error)) return false;
+    if (!openDevice(device, *handle.address(), error)) {
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=stream-start succeeded=false stage=open error=\"" + error + "\"");
+        return false;
+    }
     Bus bus(api_, handle.get(), config_.transferTimeoutMs, config_.transferRetries);
     if (!bus.setClock(device.clock)) {
         error = "Failed to set bus clock for " + device.name;
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=stream-start succeeded=false stage=configure error=\"" + error + "\"");
         return false;
     }
-    std::unique_ptr<Driver> driver = makeDriver(device.type);
-    if (!driver) { error = "No driver registered for " + device.type; return false; }
 
     std::unique_ptr<std::ofstream> streamLog;
     if (device.logStream) {
         streamLog = logger_->openDeviceLog(device);
         if (!*streamLog) {
-            logger_->audit("Could not open stream log for " + device.name);
+            logger_->audit(driverAuditContext(device, *driver) +
+                           " operation=stream-log-open succeeded=false");
             streamLog.reset();
         }
     }
-    logger_->audit("Started stream for " + device.name + " interval=" +
+    logger_->audit(driverAuditContext(device, *driver) + " operation=stream-start interval=" +
                    std::to_string(device.refreshSeconds) + "s logging=" +
                    (device.logStream ? "on" : "off"));
     while (!stop.load()) {
@@ -919,7 +967,7 @@ bool ApplicationService::streamDeviceStructured(size_t deviceIndex, std::atomic<
         }
         for (unsigned i = 0; i < device.refreshSeconds * 10 && !stop.load(); ++i) Sleep(100);
     }
-    logger_->audit("Stopped stream for " + device.name);
+    logger_->audit(driverAuditContext(device, *driver) + " operation=stream-stop");
     return true;
 }
 

@@ -791,12 +791,16 @@ void MainWindow::showDriverInformation() {
         showError(QString::fromStdString(error));
         return;
     }
-    QDialog dialog(this);
-    dialog.setWindowTitle("Driver information"); dialog.resize(950, 650);
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(new QLabel(QString::fromStdString(information.title), &dialog));
-    layout->addWidget(new QLabel(QString::fromStdString(information.capabilities), &dialog));
-    auto* table = makeTable({"Category", "Address / Action", "Access", "Purpose / Parameters"}, &dialog);
+    // Keep this dialog modeless so driver metadata remains available while
+    // the user interacts with the main window, result tables, or chart windows.
+    auto* dialog = new QDialog(this, Qt::Window);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowModality(Qt::NonModal);
+    dialog->setWindowTitle("Driver information"); dialog->resize(950, 650);
+    auto* layout = new QVBoxLayout(dialog);
+    layout->addWidget(new QLabel(QString::fromStdString(information.title), dialog));
+    layout->addWidget(new QLabel(QString::fromStdString(information.capabilities), dialog));
+    auto* table = makeTable({"Category", "Address / Action", "Access", "Purpose / Parameters"}, dialog);
     for (const DriverRegister& reg : information.registers) {
         setTableRow(table, table->rowCount(), {"Register",
             QString("0x%1 - %2").arg(reg.address, 2, HexBase, QLatin1Char('0')).arg(QString::fromStdString(reg.name)),
@@ -809,9 +813,12 @@ void MainWindow::showDriverInformation() {
                 ("Parameters: " + action.parameters.front()))});
     }
     layout->addWidget(table, 1);
-    auto* close = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    layout->addWidget(close); connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    dialog.exec();
+    auto* close = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    layout->addWidget(close);
+    connect(close, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 void MainWindow::executeDeviceAction() {
@@ -842,10 +849,13 @@ void MainWindow::executeDeviceAction() {
     }
     std::string result;
     if (!app_.executeDeviceAction(selectedDevice_, actionIt->id, parameters, result, error)) {
-        showError(QString::fromStdString(error.empty() ? result : error));
+        showError(QString("%1: action %2 failed: %3")
+            .arg(driverEventContext(selectedDevice_), QString::fromStdString(actionIt->id),
+                 QString::fromStdString(error.empty() ? result : error)));
         return;
     }
-    showMessage(QString::fromStdString(result));
+    showMessage(QString("%1: %2").arg(driverEventContext(selectedDevice_),
+                                      QString::fromStdString(result)));
 }
 
 void MainWindow::refreshDeviceSettings() {
@@ -905,7 +915,8 @@ void MainWindow::readSelectedDevice() {
         QMetaObject::invokeMethod(this, [this, index, result, error, ok] {
             readInProgress_.store(false);
             readButton_->setEnabled(true);
-            if (!ok) showError(QString::fromStdString(error.empty() ? result.error : error));
+            if (!ok) showError(QString("%1: %2")
+                .arg(driverEventContext(index), QString::fromStdString(error.empty() ? result.error : error)));
             populateDeviceResult(index, result);
         }, Qt::QueuedConnection);
     });
@@ -919,6 +930,22 @@ QString MainWindow::deviceValueText(const DeviceValue& value) const {
         else if constexpr (std::is_same_v<T, std::string>) return item;
         else { std::ostringstream stream; stream << item; return stream.str(); }
     }, value));
+}
+
+QString MainWindow::driverEventContext(size_t deviceIndex) const {
+    const AppConfig config = app_.config();
+    if (deviceIndex >= config.devices.size()) return "Device unavailable";
+    const DeviceConfig& device = config.devices[deviceIndex];
+    DriverInformation information;
+    std::string error;
+    if (!app_.driverInformation(deviceIndex, information, error)) {
+        return QString("Device \"%1\" [%2]")
+            .arg(QString::fromStdString(device.name), QString::fromStdString(device.type));
+    }
+    return QString("Device \"%1\" [%2] — Driver: %3")
+        .arg(QString::fromStdString(device.name),
+             QString::fromStdString(device.type),
+             QString::fromStdString(information.title));
 }
 
 QString MainWindow::deviceResultText(const DeviceResult& result) const {
@@ -942,7 +969,9 @@ void MainWindow::populateDeviceResult(size_t deviceIndex, const DeviceResult& re
     if (followLatest_) QTimer::singleShot(0, this, [this] {
         if (followLatest_->isChecked()) resultTable_->scrollToBottom();
     });
-    showMessage(result.succeeded ? "Device reading completed." : "Device reading failed.");
+    showMessage(QString("%1: %2")
+        .arg(driverEventContext(deviceIndex),
+             result.succeeded ? "reading completed" : "reading failed"));
 }
 
 QString MainWindow::adapterText(const AdapterInformation& adapter) const {
@@ -996,16 +1025,18 @@ void MainWindow::startStreaming() {
         app_.streamDeviceStructured(index, streamCancel_, [this, index](const std::string& when, const DeviceResult& result) {
             QMetaObject::invokeMethod(this, [this, index, when, result] {
                 populateDeviceResult(index, result);
-                showMessage(QString("Live poll received at %1.").arg(QString::fromStdString(when)));
+                showMessage(QString("%1: live poll received at %2")
+                    .arg(driverEventContext(index), QString::fromStdString(when)));
             }, Qt::QueuedConnection);
         }, error);
-        QMetaObject::invokeMethod(this, [this, error] {
+        QMetaObject::invokeMethod(this, [this, index, error] {
             streamRunning_ = false;
             streamButton_->setEnabled(true);
             stopStreamButton_->setEnabled(false);
             scanButton_->setEnabled(true);
             readButton_->setEnabled(true);
-            if (!error.empty()) showError(QString::fromStdString(error));
+            if (!error.empty()) showError(QString("%1: %2")
+                .arg(driverEventContext(index), QString::fromStdString(error)));
         }, Qt::QueuedConnection);
     });
 }

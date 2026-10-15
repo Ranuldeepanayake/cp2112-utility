@@ -29,6 +29,7 @@ list(APPEND PROJECT_SOURCES
         ${CORE_ROOT}/drivers/DS3231.cpp
         ${CORE_ROOT}/drivers/BQ4050.cpp
         ${CORE_ROOT}/drivers/24C32BN.cpp
+        ${CORE_ROOT}/drivers/SSD1306.cpp
         ${CORE_ROOT}/include/Application.h
         ${CORE_ROOT}/include/AppTypes.h
         ${CORE_ROOT}/include/CP2112Bus.h

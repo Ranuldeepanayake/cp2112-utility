@@ -64,6 +64,7 @@ private:
     void showMessage(const QString& message);
     void showError(const QString& message);
     QString configPath() const;
+    QString driverEventContext(size_t deviceIndex) const;
     QString deviceValueText(const DeviceValue& value) const;
     QString deviceResultText(const DeviceResult& result) const;
     QString adapterText(const AdapterInformation& adapter) const;

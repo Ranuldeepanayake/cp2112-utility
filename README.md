@@ -63,6 +63,7 @@ Each driver is a separate C++ translation unit:
 - `drivers/DS3231.cpp`
 - `drivers/BQ4050.cpp`
 - `drivers/24C32BN.cpp`
+- `drivers/SSD1306.cpp`
 
 Each driver implements the common interface declared in `include/DeviceDriver.h`. Drivers expose metadata and callable actions, with arguments and confirmation prompts described as data; they contain no CLI input or output. The interface includes:
 
@@ -100,7 +101,8 @@ cp2112-device-console/
 │   ├── BH1750.cpp
 │   ├── DS3231.cpp
 │   ├── BQ4050.cpp
-│   └── 24C32BN.cpp
+│   ├── 24C32BN.cpp
+│   └── SSD1306.cpp
 ├── include/
 │   ├── Application.h
 │   ├── AppTypes.h
@@ -213,7 +215,7 @@ New-Item -ItemType Directory -Force bin, logs
 ```powershell
 New-Item -ItemType Directory -Force build, bin, logs
 windres resources\app.rc -O coff -o build\app-res.o
-g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp drivers\24C32BN.cpp build\app-res.o -o bin\cp2112_console.exe
+g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp drivers\24C32BN.cpp drivers\SSD1306.cpp build\app-res.o -o bin\cp2112_console.exe
 ```
 
 The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
@@ -414,7 +416,7 @@ enabled=false
 | Key | Meaning | Accepted values / default |
 |---|---|---|
 | Section name | Friendly name used in menus and log filenames | Example: `[device BMP280-1]` |
-| `type` | Selects the compiled-in driver | `bmp280`, `mpu6050`, `bh1750`, `ds3231`, `bq4050`, `24c32bn` |
+| `type` | Selects the compiled-in driver | `bmp280`, `mpu6050`, `bh1750`, `ds3231`, `bq4050`, `24c32bn`, `ssd1306` |
 | `address` | 7-bit I²C target address | Decimal or hexadecimal, e.g. `104` or `0x68`; normally `0x08`–`0x77` |
 | `clock_hz` | Requested bus clock | 1–400000 Hz; default `100000` |
 | `adapter_index` | CP2112 adapter index | Usually `0` when one adapter is attached |
@@ -438,6 +440,7 @@ These are common defaults; the actual address depends on the part and board stra
 | DS3231 | `0x68` |
 | 24C32BN / AT24C32 EEPROM | `0x50`–`0x57` depending on address straps; `0x57` is common on DS3231 modules |
 | TI BQ4050 | `0x0B` (default Smart Battery address) |
+| SSD1306 OLED | `0x3C` or `0x3D`, selected by the module's SA0 strap |
 
 **Address conflict:** MPU-6050 and DS3231 commonly both use `0x68`. Two devices at the same address cannot normally share the same bus. Use a different valid address strap where supported, a separate adapter/bus, or an I²C multiplexer. The sample configuration disables the MPU-6050 for this reason. If AD0 is high, the MPU-6050 commonly responds at `0x69`.
 
@@ -491,6 +494,19 @@ The date/time input uses basic range checks; it does not fully validate month le
 
 The sample `24C32BN-1` configuration entry is disabled by default. Many DS3231 modules include an AT24C32 EEPROM at `0x57`; confirm the EEPROM is fitted and its address straps before enabling it.
 
+### SSD1306 I2C OLED display
+
+- Supports the common 128x64 monochrome SSD1306 command set: display on/off, software reset/reinitialization, contrast, orientation, power saving, display clock, page/column addressing, normal/inverse display, and text output.
+- `print-string` renders printable diagnostic text into a bounded 1024-byte host-side framebuffer before sending it in paced, CP2112-safe 16-byte data chunks for compatibility with SSD1306-compatible modules. Text supports a 5x7 font, scale 1–4, column/page placement, and monochrome on/off foreground color.
+- Common punctuation such as `!`, `@`, `?`, `#`, `$`, `%`, `&`, parentheses, quotes, commas, and arithmetic symbols is supported. Text wraps to subsequent display lines until the 128x64 framebuffer is full.
+- `off` means that the rendered pixels are cleared; it does not select a different physical color. Yellow/blue two-tone OLED modules use a fixed screen filter, so the SSD1306 still exposes only on/off monochrome pixels.
+- Structured driver information reports the display dimensions, framebuffer size, action-local buffered mode, transfer chunk size, important command registers, and hardware limitations.
+- Font size and color are rendering parameters rather than SSD1306 registers; they are supplied to `print-string` and are not persistent controller settings.
+- The SSD1306 does not provide a standard readable identity or calibration command. Its address cannot be changed through I²C; change the module's SA0 strap and update the configured address. The `set-address` action reports this limitation rather than claiming a software change.
+- The refresh action controls the SSD1306 display-clock divider, which is not a guaranteed physical refresh frequency in hertz.
+
+The sample `SSD1306-1` entry is disabled by default and uses the common `0x3C` address. Confirm the module resolution, controller variant, SA0 strap, reset wiring, and voltage levels before enabling it.
+
 ### TI BQ4050
 
 - Reads Smart Battery System (SBS) word commands at the configured 7-bit address (commonly `0x0B`).
@@ -529,7 +545,7 @@ The application creates a separate audit file such as:
 logs/audit_20261013_101500.log
 ```
 
-Audit entries include timestamps for application startup/shutdown, configuration load, device selection, reads and writes initiated through menus, scan start/completion, stream start/stop, and runtime setting changes. The audit log is separate from the device CSV stream files.
+Audit entries include timestamps for application startup/shutdown, configuration load, device selection, reads and writes initiated through menus, scan start/completion, stream start/stop, and runtime setting changes. Driver-backed operations identify the configured device, its `type`, the driver title, operation/action, success state, and result or failure stage. The audit log is separate from the device CSV stream files.
 
 Logs use local Windows system time. Protect log files appropriately if they contain sensitive operational information.
 
