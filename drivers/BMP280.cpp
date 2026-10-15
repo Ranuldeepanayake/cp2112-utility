@@ -18,10 +18,53 @@ struct Bmp280Driver : Driver {
     }
 
     bool readResult(Bus& bus, const DeviceConfig& d, DeviceResult& result) override {
-        std::vector<BYTE> id, calibration, raw;
+        std::vector<BYTE> id, calibration, control, status, raw;
         if (!bus.read(d.address, 0xD0, 1, 1, id) ||
             !bus.read(d.address, 0x88, 1, 24, calibration) ||
-            !bus.read(d.address, 0xF7, 1, 6, raw)) {
+            !bus.read(d.address, 0xF4, 1, 1, control)) {
+            result.error = "I2C read failed";
+            return false;
+        }
+
+        if (id.empty() || id[0] != 0x58) {
+            result.error = "unexpected BMP280 chip ID";
+            return false;
+        }
+
+        // Request a fresh forced-mode conversion for every read. This is
+        // important when the device was left in sleep mode: register 0xF7
+        // otherwise contains the previous conversion indefinitely.
+        BYTE measurementControl = control[0];
+        // A zero oversampling field disables that measurement. Use x1 as a
+        // safe default so both pressure and temperature are refreshed.
+        if ((measurementControl & 0xE0) == 0) measurementControl |= 0x20;
+        if ((measurementControl & 0x1C) == 0) measurementControl |= 0x04;
+        measurementControl = static_cast<BYTE>((measurementControl & 0xFC) | 0x01);
+        if (!bus.writeReg(d.address, 0xF4, measurementControl)) {
+            result.error = "could not start BMP280 forced conversion";
+            return false;
+        }
+
+        // Wait until the BMP280 clears the measuring bit in STATUS (0xF3).
+        // The bounded loop prevents a faulty device from hanging live polling.
+        bool ready = false;
+        for (unsigned attempt = 0; attempt < 100; ++attempt) {
+            if (!bus.read(d.address, 0xF3, 1, 1, status) || status.empty()) {
+                result.error = "could not read BMP280 conversion status";
+                return false;
+            }
+            if ((status[0] & 0x08) == 0) {
+                ready = true;
+                break;
+            }
+            Sleep(1);
+        }
+        if (!ready) {
+            result.error = "BMP280 conversion timed out";
+            return false;
+        }
+
+        if (!bus.read(d.address, 0xF7, 1, 6, raw)) {
             result.error = "I2C read failed";
             return false;
         }
