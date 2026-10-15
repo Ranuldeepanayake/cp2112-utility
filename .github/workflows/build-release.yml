@@ -195,6 +195,11 @@ jobs:
           arch: win64_mingw
           archives: qtbase
           cache: true
+          # Qt 6.12 uses the newer per-architecture repository metadata layout.
+          # The released PyPI aqtinstall package used by the action cannot read it.
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git'
+          # Keep this cache separate from other Qt versions and architectures.
+          cache-key-prefix: 'cp2112-utility-qt-6.12.0-win64-mingw'
 
       # Action: compile the CLI executable using its pipeline-specific name.
       - name: Build executable
