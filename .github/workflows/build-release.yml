@@ -92,6 +92,8 @@ jobs:
             throw "g++.exe was not found in the extracted WinLibs archive: $toolchainRoot"
           }
           $compilerBin = $compiler.Directory.FullName
+          # Keep the CLI toolchain addressable after the Qt action changes PATH.
+          "CP2112_WINLIBS_BIN=$compilerBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $compilerBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           $env:Path = "$compilerBin;$env:Path"
           Write-Host "Using pinned compiler from $compilerBin"
@@ -153,24 +155,24 @@ jobs:
       - name: Check MinGW-w64 toolchain
         shell: pwsh
         run: |
-          # Confirm that the compiler is available after the pinned toolchain step.
-          $compiler = Get-Command g++ -ErrorAction SilentlyContinue
-          if (-not $compiler) {
-            throw 'g++ was not found on the Windows runner. Install MinGW-w64 or update the runner toolchain configuration.'
+          # Confirm that the separately pinned CLI compiler is available.
+          $compilerPath = Join-Path $env:CP2112_WINLIBS_BIN 'g++.exe'
+          if (-not (Test-Path $compilerPath)) {
+            throw "The pinned WinLibs compiler was not found: $compilerPath"
           }
           # Confirm that the selected compiler targets 64-bit Windows.
-          g++ --version
-          $target = (& g++ -dumpmachine).Trim()
+          & $compilerPath --version
+          $target = (& $compilerPath -dumpmachine).Trim()
           if ($target -notmatch 'x86_64|amd64') {
             throw "The available g++ is not the required 64-bit MinGW toolchain: $target"
           }
 
           # Confirm that the same pinned toolchain provides the Windows resource compiler.
-          $resourceCompiler = Get-Command windres -ErrorAction SilentlyContinue
-          if (-not $resourceCompiler) {
-            throw 'windres was not found beside the pinned MinGW-w64 toolchain.'
+          $resourceCompiler = Join-Path $env:CP2112_WINLIBS_BIN 'windres.exe'
+          if (-not (Test-Path $resourceCompiler)) {
+            throw "windres was not found beside the pinned MinGW-w64 toolchain: $resourceCompiler"
           }
-          windres --version
+          & $resourceCompiler --version
 
       # Action: compile the multi-resolution executable icon resource.
       - name: Build Windows icon resource
@@ -180,10 +182,28 @@ jobs:
           New-Item -ItemType Directory -Force build | Out-Null
 
           # Convert the .rc definition and .ico image into a linkable COFF object.
-          windres resources\app.rc -O coff -o build\app-res.o
+          & (Join-Path $env:CP2112_WINLIBS_BIN 'windres.exe') resources\app.rc -O coff -o build\app-res.o
           if ($LASTEXITCODE -ne 0) {
             throw "windres failed with exit code $LASTEXITCODE"
           }
+
+      # Action: install the cached Qt Widgets package required by the GUI build.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.12.0'
+          host: windows
+          target: desktop
+          arch: win64_mingw
+          archives: qtbase
+          # Install the MinGW 13.1 toolchain used to build Qt 6.12 MinGW kits.
+          tools: 'tools_mingw1310,qt.tools.win64_mingw1310'
+          cache: true
+          # Qt 6.12 uses the newer per-architecture repository metadata layout.
+          # The released PyPI aqtinstall package used by the action cannot read it.
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git'
+          # Keep this cache separate from other Qt versions and architectures.
+          cache-key-prefix: 'cp2112-utility-qt-6.12.0-win64-mingw'
 
       # Action: compile the CLI executable using its pipeline-specific name.
       - name: Build executable
@@ -191,17 +211,105 @@ jobs:
         env:
           EXECUTABLE_NAME: ${{ steps.package.outputs.executable_name }}
         run: |
-          # Create directories and remove older locally generated executables.
-          New-Item -ItemType Directory -Force bin, logs | Out-Null
-          Get-ChildItem bin -Filter '*.exe' -File | Remove-Item -Force
+          # Create directories and remove older locally generated CLI executables.
+          New-Item -ItemType Directory -Force 'bin\cli', logs | Out-Null
+          Get-ChildItem 'bin\cli' -Filter '*.exe' -File | Remove-Item -Force
 
-          # Compile and link all application sources together with the icon resource.
-          g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude `
+          # Compile and dynamically link the CLI with WinLibs explicitly.
+          # Do not use PATH here because the Qt action prepends its own compiler.
+          $cliCompiler = Join-Path $env:CP2112_WINLIBS_BIN 'g++.exe'
+          & $cliCompiler -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude `
             src\main.cpp src\Application.cpp src\DriverRegistry.cpp `
             drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp `
             drivers\DS3231.cpp drivers\BQ4050.cpp `
+            drivers\24C32BN.cpp drivers\SSD1306.cpp `
             build\app-res.o `
-            -o "bin\$env:EXECUTABLE_NAME.exe"
+            -o "bin\cli\$env:EXECUTABLE_NAME.exe"
+
+      # Action: configure and build the Qt GUI against the shared application service.
+      - name: Build Qt GUI
+        shell: pwsh
+        run: |
+          # Confirm that the Qt action supplied a usable installation root.
+          if (-not $env:QT_ROOT_DIR) {
+            throw 'QT_ROOT_DIR was not provided by install-qt-action.'
+          }
+          if (-not (Test-Path (Join-Path $env:QT_ROOT_DIR 'lib\cmake\Qt6'))) {
+            throw "Qt 6 CMake package was not found below QT_ROOT_DIR: $env:QT_ROOT_DIR"
+          }
+
+          # Build the GUI with the MinGW kit used to build the installed Qt DLLs.
+          # The CLI uses the separately pinned WinLibs compiler and keeps its
+          # dynamic runtime beside the CLI executable.
+          # QT_ROOT_DIR is ...\Qt\6.12.0\mingw_64; the action installs tools
+          # beside the version directory at ...\Qt\Tools, not below QT_ROOT_DIR.
+          $qtInstallRoot = Split-Path (Split-Path $env:QT_ROOT_DIR -Parent) -Parent
+          $qtToolsRoot = Join-Path $qtInstallRoot 'Tools'
+          $qtCompiler = Get-ChildItem -Path $qtToolsRoot -Filter 'g++.exe' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'mingw' } |
+            Select-Object -First 1
+          if (-not $qtCompiler) {
+            throw "Qt's bundled MinGW compiler was not found below $qtToolsRoot"
+          }
+          $qtCompilerBin = Split-Path $qtCompiler.FullName
+          $qtCompilerTarget = (& (Join-Path $qtCompilerBin 'g++') -dumpmachine).Trim()
+          if ($qtCompilerTarget -notmatch 'x86_64|amd64') {
+            throw "Qt's compiler is not 64-bit: $qtCompilerTarget"
+          }
+          Write-Host "Using Qt MinGW compiler: $($qtCompiler.FullName)"
+
+          # Use Ninja and explicitly select the Qt-compatible 64-bit compiler.
+          cmake -S cp2112-utility-gui `
+                -B cp2112-utility-gui\build\release `
+                -G Ninja `
+                -DCMAKE_BUILD_TYPE=Release `
+                -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+                -DCMAKE_CXX_COMPILER="$($qtCompiler.FullName)" `
+                -DCP2112_SKIP_RUNTIME_COPY=ON
+          if ($LASTEXITCODE -ne 0) { throw "Qt GUI CMake configuration failed with exit code $LASTEXITCODE" }
+
+          cmake --build cp2112-utility-gui\build\release --parallel
+          if ($LASTEXITCODE -ne 0) { throw "Qt GUI build failed with exit code $LASTEXITCODE" }
+
+          # The GUI CMake post-build step places the GUI executable in bin/gui.
+          if (-not (Test-Path 'bin\gui\cp2112-utility-gui.exe')) {
+            throw 'The Qt GUI executable was not produced in bin/gui.'
+          }
+
+          # Add Qt runtime files to bin/gui only when the repository does not already contain them.
+          New-Item -ItemType Directory -Force 'bin\gui\platforms' | Out-Null
+          $qtRuntimeFiles = @('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll')
+          foreach ($runtimeName in $qtRuntimeFiles) {
+            $destination = Join-Path 'bin\gui' $runtimeName
+            if (-not (Test-Path $destination)) {
+              $source = Join-Path $env:QT_ROOT_DIR "bin\$runtimeName"
+              if (-not (Test-Path $source)) { throw "Qt runtime file was not found: $source" }
+              Copy-Item $source $destination
+            } else {
+              Write-Host "Keeping repository Qt runtime DLL: $destination"
+            }
+          }
+          # Copy Qt MinGW runtime files only when the repository does not already
+          # contain them. This preserves the tracked, known-good DLL versions.
+          $qtMinGWRuntimeFiles = @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')
+          foreach ($runtimeName in $qtMinGWRuntimeFiles) {
+            $destination = Join-Path 'bin\gui' $runtimeName
+            if (-not (Test-Path $destination)) {
+              $source = Join-Path $qtCompilerBin $runtimeName
+              if (-not (Test-Path $source)) { throw "Qt MinGW runtime file was not found: $source" }
+              Copy-Item $source $destination
+            } else {
+              Write-Host "Keeping repository Qt MinGW runtime: $destination"
+            }
+          }
+          $platformDestination = 'bin\gui\platforms\qwindows.dll'
+          if (-not (Test-Path $platformDestination)) {
+            $platformSource = Join-Path $env:QT_ROOT_DIR 'plugins\platforms\qwindows.dll'
+            if (-not (Test-Path $platformSource)) { throw "Qt platform plugin was not found: $platformSource" }
+            Copy-Item $platformSource $platformDestination
+          } else {
+            Write-Host "Keeping repository Qt platform plugin: $platformDestination"
+          }
 
       # Action: verify that the executable and Silicon Labs DLLs use the same
       # PE architecture, preventing Windows error 193 packages.
@@ -210,11 +318,11 @@ jobs:
         env:
           EXECUTABLE_NAME: ${{ steps.package.outputs.executable_name }}
         run: |
-          # Locate objdump from the exact compiler used for this build.
-          $toolchainBin = Split-Path (Get-Command g++).Source
+          # Locate objdump from the separately pinned CLI toolchain, not Qt's PATH entry.
+          $toolchainBin = $env:CP2112_WINLIBS_BIN
           $objdump = Join-Path $toolchainBin 'objdump.exe'
           # Determine the PE format expected from the compiler target.
-          $target = (& g++ -dumpmachine).Trim()
+          $target = (& (Join-Path $toolchainBin 'g++.exe') -dumpmachine).Trim()
           $expectedFormat = if ($target -match 'x86_64|amd64') {
             'pei-x86-64'
           } elseif ($target -match 'i[3-6]86|mingw32') {
@@ -225,9 +333,12 @@ jobs:
 
           # Check the executable and both vendor DLLs before packaging.
           $files = @(
-            "bin\$env:EXECUTABLE_NAME.exe",
-            'bin\SLABHIDDevice.dll',
-            'bin\SLABHIDtoSMBus.dll'
+            "bin\cli\$env:EXECUTABLE_NAME.exe",
+            'bin\gui\cp2112-utility-gui.exe',
+            'bin\cli\SLABHIDDevice.dll',
+            'bin\cli\SLABHIDtoSMBus.dll',
+            'bin\gui\SLABHIDDevice.dll',
+            'bin\gui\SLABHIDtoSMBus.dll'
           )
           foreach ($file in $files) {
             if (-not (Test-Path $file)) {
@@ -240,24 +351,25 @@ jobs:
             Write-Host "$file matches $expectedFormat"
           }
 
-      # Action: bundle the MinGW runtime DLLs required by the compiled executable.
+      # Action: bundle the MinGW runtime DLLs required by the dynamically linked CLI.
       - name: Bundle MinGW runtime DLLs
         shell: pwsh
         env:
           EXECUTABLE_NAME: ${{ steps.package.outputs.executable_name }}
         run: |
-          # Locate the executable, objdump, and directories where runtime DLLs may exist.
-          $toolchainBin = Split-Path (Get-Command g++).Source
+          # Locate the executable and the exact WinLibs runtime source directory.
+          # Never search PATH: Qt's MinGW runtime may appear there after Qt setup.
+          $toolchainBin = $env:CP2112_WINLIBS_BIN
           $objdump = Join-Path $toolchainBin 'objdump.exe'
-          $executable = Join-Path $PWD "bin\$env:EXECUTABLE_NAME.exe"
+          $cliDirectory = Join-Path $PWD 'bin\cli'
+          $executable = Join-Path $cliDirectory "$env:EXECUTABLE_NAME.exe"
 
           if (-not (Test-Path $objdump)) {
             throw "objdump.exe was not found beside g++ at $toolchainBin"
           }
 
           # Walk the executable's transitive imports to discover required runtimes.
-          $searchDirectories = @($toolchainBin) + ($env:Path -split ';' | Where-Object { $_ }) |
-            Select-Object -Unique
+          $searchDirectories = @($toolchainBin)
           $runtimePaths = @{}
           $missingRuntime = @()
           $inspected = @{}
@@ -303,40 +415,55 @@ jobs:
           # Stop before packaging if any imported MinGW runtime could not be found.
           $missingRuntime = @($missingRuntime | Sort-Object -Unique)
           if ($missingRuntime.Count -gt 0) {
-            throw "Required MinGW runtime DLL(s) were not found on the runner PATH: $($missingRuntime -join ', ')"
+            throw "Required WinLibs runtime DLL(s) were not found in ${toolchainBin}: $($missingRuntime -join ', ')"
           }
           $runtimeDependencies = @($runtimePaths.Keys | Sort-Object)
           Write-Host "Imported MinGW runtime DLLs: $($runtimeDependencies -join ', ')"
 
-          # Copy all imports discovered from the executable and its dependencies.
+          # Copy all CLI imports discovered from the executable and its dependencies.
           $bundled = @()
           foreach ($dependency in $runtimeDependencies) {
-            Copy-Item $runtimePaths[$dependency] bin -Force
-            $bundled += $dependency
+            $destination = Join-Path 'bin\cli' $dependency
+            $source = $runtimePaths[$dependency]
+            if (-not (Test-Path $destination) -or
+                (Get-FileHash $destination -Algorithm SHA256).Hash -ne (Get-FileHash $source -Algorithm SHA256).Hash) {
+              # Replace a stale or foreign runtime with the exact WinLibs copy.
+              Copy-Item $source $destination -Force
+              Write-Host "Copied WinLibs runtime DLL: $destination"
+            } else {
+              Write-Host "Keeping matching WinLibs runtime DLL: $destination"
+            }
+            if ($bundled -notcontains $dependency) { $bundled += $dependency }
           }
 
-          if ($bundled.Count -eq 0) {
-            throw 'No MinGW runtime DLL was bundled; the release may fail on machines without MinGW installed.'
-          }
-
-          # Include the runtime DLL naming variants shipped by WinLibs.
+          # Include the runtime DLL naming variants shipped by WinLibs in bin/cli.
           # Explicitly include the runtime names shipped by the pinned WinLibs
           # archive, including the MCF runtime libmcfgthread-2.dll.
           $explicitRuntimeFiles = Get-ChildItem -Path $toolchainBin -File |
             Where-Object { $_.Name -match '^(libgcc_s_seh-\d+\.dll|libstdc\+\+-\d+\.dll|libwinpthread-\d+\.dll|libmcfgthread-\d+\.dll)$' }
           foreach ($runtimeFile in $explicitRuntimeFiles) {
-            Copy-Item $runtimeFile.FullName bin -Force
-            if ($bundled -notcontains $runtimeFile.Name) {
-              $bundled += $runtimeFile.Name
+            $destination = Join-Path 'bin\cli' $runtimeFile.Name
+            if (-not (Test-Path $destination) -or
+                (Get-FileHash $destination -Algorithm SHA256).Hash -ne (Get-FileHash $runtimeFile.FullName -Algorithm SHA256).Hash) {
+              # Ensure every shipped runtime variant comes from WinLibs.
+              Copy-Item $runtimeFile.FullName $destination -Force
+              Write-Host "Copied WinLibs runtime DLL: $destination"
+            } else {
+              Write-Host "Keeping matching WinLibs runtime DLL: $destination"
             }
+            if ($bundled -notcontains $runtimeFile.Name) { $bundled += $runtimeFile.Name }
           }
 
-          # Verify that every required runtime DLL is physically in bin.
+          if ($bundled.Count -eq 0) {
+            throw 'No MinGW runtime DLL was bundled for the dynamically linked CLI.'
+          }
+
+          # Verify that every required CLI runtime DLL is physically in bin/cli.
           $requiredRuntimeNames = @('libgcc_s_seh-1.dll', 'libstdc++-6.dll') +
             @($explicitRuntimeFiles |
               Where-Object { $_.Name -like 'libwinpthread-*.dll' -or $_.Name -like 'libmcfgthread-*.dll' } |
               ForEach-Object Name)
-          $missingPackagedRuntime = @($requiredRuntimeNames | Where-Object { -not (Test-Path (Join-Path 'bin' $_)) })
+          $missingPackagedRuntime = @($requiredRuntimeNames | Where-Object { -not (Test-Path (Join-Path 'bin\cli' $_)) })
           if ($missingPackagedRuntime.Count -gt 0) {
             throw "Required MinGW runtime DLL(s) were not packaged: $($missingPackagedRuntime -join ', ')"
           }
