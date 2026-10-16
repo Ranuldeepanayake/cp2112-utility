@@ -14,6 +14,7 @@ The application separates the CLI and configuration handling from the device-spe
 - [Prerequisites](#prerequisites)
 - [Obtain the Silicon Labs SDK files](#obtain-the-silicon-labs-sdk-files)
 - [Build with MinGW-w64](#build-with-mingw-w64)
+- [Build the Qt GUI](#build-the-qt-gui)
 - [Run the application](#run-the-application)
 - [Main menu and navigation](#main-menu-and-navigation)
 - [Configuration reference](#configuration-reference)
@@ -50,6 +51,8 @@ The application separates the CLI and configuration handling from the device-spe
 
 `include/Application.h` and `src/Application.cpp` provide the UI-independent `ApplicationService`. It owns configuration loading/reloading, adapter enumeration and opening, device reads and actions, streaming callbacks, I²C scans, runtime device settings, and log cleanup. A future frontend can call these operations without using console menus or relying on `std::cin`/`std::cout`.
 
+Device reads are available through `ApplicationService::readDeviceResult()`, which returns a structured `DeviceResult` containing typed `DeviceReading` fields with keys, raw values, converted values, and units. Structured streaming is available through `streamDeviceStructured()`. The existing `readDevice()` and `streamDevice()` methods remain CLI-compatible renderers over those structured results; GUI code should use the structured methods instead of parsing display strings.
+
 ### Device drivers
 
 Each driver is a separate C++ translation unit:
@@ -59,6 +62,8 @@ Each driver is a separate C++ translation unit:
 - `drivers/BH1750.cpp`
 - `drivers/DS3231.cpp`
 - `drivers/BQ4050.cpp`
+- `drivers/24C32BN.cpp`
+- `drivers/SSD1306.cpp`
 
 Each driver implements the common interface declared in `include/DeviceDriver.h`. Drivers expose metadata and callable actions, with arguments and confirmation prompts described as data; they contain no CLI input or output. The interface includes:
 
@@ -95,7 +100,9 @@ cp2112-device-console/
 │   ├── MPU6050.cpp
 │   ├── BH1750.cpp
 │   ├── DS3231.cpp
-│   └── BQ4050.cpp
+│   ├── BQ4050.cpp
+│   ├── 24C32BN.cpp
+│   └── SSD1306.cpp
 ├── include/
 │   ├── Application.h
 │   ├── AppTypes.h
@@ -105,9 +112,15 @@ cp2112-device-console/
 ├── config/
 │   └── devices.ini
 ├── bin/
-│   ├── cp2112_console.exe        # generated during build
-│   ├── SLABHIDtoSMBus.dll        # supplied by Silicon Labs SDK
-│   └── SLABHIDDevice.dll         # supplied by Silicon Labs SDK
+│   ├── cli/
+│   │   ├── cp2112_console.exe    # generated during build
+│   │   └── MinGW runtime DLLs    # tracked CLI dependencies
+│   ├── gui/
+│   │   ├── cp2112-utility-gui.exe # generated during build
+│   │   ├── Qt and MinGW DLLs      # tracked GUI dependencies
+│   │   ├── SLABHIDtoSMBus.dll     # supplied by Silicon Labs SDK
+│   │   ├── SLABHIDDevice.dll      # supplied by Silicon Labs SDK
+│   │   └── platforms/qwindows.dll
 ├── logs/                         # generated at runtime
 └── README.md
 ```
@@ -143,21 +156,33 @@ If PowerShell reports that `g++` is not recognized, install 64-bit MinGW-w64 and
 
 Windows normally supplies the USB HID class driver used by CP2112. The application still requires the Silicon Labs user-space API DLLs.
 
+## Credits and third-party notices
+
+The application is presented as **CP2112 Utility by ranuldeepanayake and AI**. It is a non-commercial personal/project utility, but non-commercial use does not automatically remove third-party license obligations.
+
+- The Windows build uses a 64-bit MinGW-w64 toolchain. Review and retain the license notices supplied with the selected WinLibs/MinGW-w64 distribution and its runtime DLLs.
+- The Qt GUI uses Qt 6 Widgets. Qt licensing depends on the Qt package and edition used; retain the applicable Qt license and notices when redistributing the GUI and its Qt DLLs. The project source itself does not modify Qt.
+- The CP2112 runtime DLLs (`SLABHIDtoSMBus.dll` and `SLABHIDDevice.dll`) are Silicon Labs components and remain subject to Silicon Labs' terms. They are not project-authored code.
+
+For any release package, include the license files/notices that accompany the exact MinGW-w64, Qt, and Silicon Labs packages used to create that package. This README provides attribution guidance; it is not a substitute for the bundled third-party license texts.
+
 ## Obtain the Silicon Labs SDK files
 
 Start at the official [Silicon Labs CP2112 software page](https://www.silabs.com/interface/usb-bridges/classic/device.cp2112?tab=softwareandtools).
 
-Download/install the applicable CP2112 software package and locate the runtime DLLs. Copy these files into the project's `bin/` directory:
+Download/install the applicable CP2112 software package and locate the runtime DLLs. Copy these files into both `bin\cli` and `bin\gui`:
 
 ```text
-bin/
+bin/cli/
 ├── SLABHIDtoSMBus.dll
 └── SLABHIDDevice.dll
 ```
 
-The DLLs must match the architecture of the executable. This project requires 64-bit Silicon Labs DLLs, so local builds and the GitHub Actions workflow use the available 64-bit MinGW-w64 compiler and build with `-m64`. The workflow checks the compiler and DLL architectures before packaging; a mismatch is rejected instead of producing a package that fails with Windows error 193.
+The DLLs must match the architecture of the executable. This project requires 64-bit Silicon Labs DLLs, so local builds and the GitHub Actions workflow use the available 64-bit MinGW-w64 compiler and build with `-m64`. The workflow checks the compiler and DLL architectures before packaging; a mismatch is rejected instead of producing a package that fails with Windows error 193. There are no Silicon Labs DLLs in `bin` root: each executable directory contains the copy it needs, alongside its own toolchain DLLs.
 
 The source dynamically loads `SLABHIDtoSMBus.dll`. It does not require an MSVC import library for this dynamic-loading approach.
+
+The configuration keeps the portable logical value `bridge_dll=bin\SLABHIDtoSMBus.dll`. At startup, each executable falls back to its own directory (`bin\cli` or `bin\gui`) because that is where its matching Silicon Labs DLL copies live. The default `log_dir=logs` is resolved relative to the package root, which is two levels above either executable, and the application creates that directory automatically.
 
 ## Build with MinGW-w64
 
@@ -176,7 +201,7 @@ For an exact match with CI, use the pinned WinLibs archive `x86_64-16.2.0-releas
 
 `mingw32-make` is the traditional Windows executable name for MinGW's GNU Make program. It does not mean that the build is 32-bit; the compiler target is controlled by `g++`, and this project explicitly uses the 64-bit `x86_64-w64-mingw32` compiler with `-m64`. There is normally no separate `mingw64-make` executable.
 
-The Makefile compiles all application and driver sources, embeds `resources\cp2112.ico` through the intermediate `build\app-res.o` resource object, and produces `bin\cp2112_console.exe`. It creates `bin/`, `build/`, and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated build outputs are ignored by Git.
+The Makefile compiles all application and driver sources, dynamically links the MinGW C++ runtime, copies the selected toolchain's runtime DLLs into `bin\cli`, embeds `resources\cp2112.ico` through the intermediate `build\app-res.o` resource object, and produces `bin\cli\cp2112_console.exe`. Set `TOOLCHAIN_BIN` when the 64-bit MinGW installation is not `C:\mingw64\bin`. It creates `bin\cli`, `build/`, and `logs/` when needed. Local builds do not change the build metadata in `config\devices.ini`, and locally generated executables are ignored by Git while the required DLLs are tracked.
 
 Other Make targets are:
 
@@ -190,15 +215,15 @@ The `run` target must be launched from the project or release-package root so th
 ### 1. Create the output directory if needed
 
 ```powershell
-New-Item -ItemType Directory -Force bin, logs
+New-Item -ItemType Directory -Force bin\cli, logs
 ```
 
 ### 2. Compile and link the main application and all drivers
 
 ```powershell
-New-Item -ItemType Directory -Force build, bin, logs
+New-Item -ItemType Directory -Force build, bin\cli, logs
 windres resources\app.rc -O coff -o build\app-res.o
-g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp build\app-res.o -o bin\cp2112_console.exe
+g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp drivers\24C32BN.cpp drivers\SSD1306.cpp build\app-res.o -o bin\cli\cp2112_console.exe
 ```
 
 The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
@@ -217,26 +242,46 @@ The executable icon is defined by `resources\app.rc` and `resources\cp2112.ico`.
 Get-ChildItem bin
 ```
 
-You should see the generated executable, the MinGW runtime DLLs required by that executable, and the two Silicon Labs DLLs. The executable is created by compilation; the Silicon Labs DLLs must be copied from the SDK.
+You should see the CLI executable and its MinGW runtime DLLs in `bin\cli`, plus the two common Silicon Labs DLLs in `bin`. The executable is created by compilation; the Silicon Labs DLLs must be copied from the SDK.
 
 The application creates the configured log directory automatically at startup. It also reports a startup prerequisite warning and stops before hardware access if the configured file, either required Silicon Labs DLL, or the audit log cannot be created.
+
+## Build the Qt GUI
+
+The Qt frontend is in `cp2112-utility-gui/`. It links the same `ApplicationService` and device-driver sources used by the CLI, so hardware access, structured readings, scan cancellation, settings persistence, logging, and validation are shared rather than reimplemented.
+
+Open `cp2112-utility-gui/CMakeLists.txt` in Qt Creator, select a 64-bit MinGW kit, configure, and build. Alternatively, from the GUI directory, use a Qt installation's CMake and Ninja tools:
+
+```powershell
+$env:Path = "C:\Qt\Tools\Ninja;C:\Qt\Tools\mingw1310_64\bin;" + $env:Path
+cmake -S . -B build\release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:\Qt\6.12.0\mingw_64
+cmake --build build\release --parallel
+```
+
+Run the GUI from the project root or a release package root so it can locate `config\devices.ini`, `logs\`, and the CP2112 DLLs. The GUI searches the current directory, its executable directory, and the nearby project-parent directories for the configuration file. The GUI uses the Qt runtime files in `bin\gui`; the CLI uses the separate MinGW runtime files in `bin\cli`.
+
+The GUI provides a dedicated re-queryable adapter-information page, click-to-select configured devices, structured timestamped readings, driver information and actions, live polling with cancellation and follow-latest scrolling, address scanning with live scanned/responded counts and optional non-responding rows (the completed scan can be re-filtered without rescanning), direct hexadecimal register reads and writes with visible status, a separate selected-device settings dialog, persisted general settings, configuration reload under Settings, retention cleanup and a confirmed clear-all-logs action, light/dark theme selection, and separate multi-instance line charts for numeric processed or raw readings. Build metadata is shown in the bottom status area.
+
+When the GUI is built on Windows, its CMake configuration copies the GUI executable and Qt's matching runtime files into `bin\gui`. This includes `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, Qt's MinGW runtime DLLs, and `platforms\qwindows.dll`. The GUI executable is ignored by Git, while the runtime DLLs are intentionally trackable dependencies.
+
+For a standalone folder, keep `config\devices.ini` two levels above either executable, keep the Silicon Labs DLLs in `bin` and beside each executable, keep the CLI executable and MinGW DLLs in `bin\cli`, and keep the GUI executable, Qt DLLs, and `platforms\qwindows.dll` in `bin\gui`.
 
 ## Run the application
 
 From the project root:
 
 ```powershell
-.\bin\cp2112_console.exe
+.\bin\cli\cp2112_console.exe
 ```
 
-Release packages contain both `bin/` and `config/` at the package root. The executable searches the current directory, its parent directory, and the executable/package directories for `config\devices.ini`, so it can be launched from either the package root or directly from `bin/`. Relative `bridge_dll` and `log_dir` paths are resolved from the package root when the config file is inside the standard `config/` directory.
+Release packages contain both `bin/` and `config/` at the package root. Each executable is two directory levels below the package root (`bin\cli` or `bin\gui`) and searches upward for `config\devices.ini`. Relative `bridge_dll` and `log_dir` paths are resolved from the package root when the config file is inside the standard `config/` directory.
 
 By default, the program reads `config\devices.ini`.
 
 To use a different configuration file:
 
 ```powershell
-.\bin\cp2112_console.exe .\config\devices.ini
+.\bin\cli\cp2112_console.exe .\config\devices.ini
 ```
 
 Use paths relative to the working directory from which you launch the application unless you update the source to resolve paths relative to the executable.
@@ -249,7 +294,7 @@ The workflow is stored in `.github/workflows/build-release.yml`. It runs for:
 - A merged `develop` to `main` pull request (`github.event.pull_request.merged == true`): creates a production build.
 - A manual dispatch from `develop`: creates a beta build.
 
-The workflow checks for an available 64-bit MinGW-w64 compiler, builds the CLI executable as `cp2112_console.exe`, verifies that the executable and Silicon Labs DLLs are 64-bit, bundles all imported MinGW runtime DLLs, and packages both `bin/` and `config/`. The ZIP/release name is `cp2112_utility-ddmmyyyyhhmm-buildnumber-beta.zip` for beta builds or `cp2112_utility-ddmmyyyyhhmm-buildnumber.zip` for merged releases. Opening a `develop` to `main` pull request creates a beta package; closing it as merged (`github.event.pull_request.merged == true`) creates the release package without a state suffix. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
+The workflow checks for an available 64-bit MinGW-w64 compiler, installs Qt 6.12 and its matching MinGW 13.1 toolchain through `install-qt-action` using the current `aqtinstall` source needed for Qt 6.12's repository metadata, and caches the complete Qt/toolchain installation with a project/version/architecture-specific cache key. The CLI is explicitly compiled and runtime-bundled from the separately pinned WinLibs archive; Qt's compiler and DLLs cannot replace the CLI runtime. It dynamically builds the CLI into `bin/cli`, builds the Qt GUI into `bin/gui`, verifies that the executables and Silicon Labs DLLs are 64-bit, bundles only missing runtime DLLs into the matching subdirectory, and packages both `bin/` and `config/`. Existing tracked Qt, MinGW, and Silicon Labs DLLs are preserved; runner copies are used only when a required file is absent. The ZIP/release name is `cp2112_utility-ddmmyyyyhhmm-buildnumber-beta.zip` for beta builds or `cp2112_utility-ddmmyyyyhhmm-buildnumber.zip` for merged releases. Opening a `develop` to `main` pull request creates a beta package; closing it as merged (`github.event.pull_request.merged == true`) creates the release package without a state suffix. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
 
 After compilation succeeds, CI updates `build_timestamp` (`ddMMyyyyHHmm`), `build_number`, and `beta` in `config\devices.ini`, commits those values back to the source branch, and uses that commit for the release tag. If compilation fails, no metadata commit or release tag is created. The workflow must be present on `main` before merged pull request events can trigger production runs.
 
@@ -259,11 +304,12 @@ The main menu provides these options:
 
 1. **List configured devices** — display enabled device entries and their type, address, clock, refresh interval, and logging setting.
 2. **Select device** — choose a configured device and enter its device menu.
-3. **Adapter information** — enumerate the CP2112 adapters detected by the application.
+3. **Adapter information** — enumerate detected adapters and read their current part number, part version, USB VID/PID, USB release, manufacturer/product/serial strings, SMBus library version, HID library version, stored USB configuration (VID/PID, release, power, and power mode), configuration lock bits, and active SMBus settings (bus speed, target address, timeouts, retries, automatic read response, and SCL-low timeout). This menu is read-only; it does not change persistent USB configuration.
 4. **Reload configuration** — reread device definitions and scan defaults from the configuration file. Changes to `bridge_dll` or `log_dir` still require restarting.
-5. **Scan I²C addresses** — scan the configured address range and bus clock, or enter overrides. Progress shows each 7-bit device address in hexadecimal and decimal. Press Enter at a scan prompt to accept its configured default.
-6. **Direct register read/write** — send a one-byte read or write command to a selected I²C device and register address.
+5. **Scan I²C addresses** — scan the configured address range and bus clock, or enter overrides. Progress shows each 7-bit device address in hexadecimal and decimal. Press Enter at a scan prompt to accept its configured default. Press `Q` or `Esc` during a scan to cancel the active CP2112 transfer; the final output includes raw API status, transfer state, detailed status, retries, byte count, timeout, and cancellation fields.
+6. **Direct register read/write** — send a read or write command to a selected I²C device and register address. Register Access supports an expected read length of 1–512 bytes; the default is one byte. Returned bytes are shown as a copyable hexadecimal stream. The expected length is required for bounded SMBus transfers so the CP2112 can complete the read correctly. Writes remain one byte at a time.
 7. **Clean old logs** — interactively delete application logs older than a specified number of days.
+8. **Settings** — update validated general and device-specific settings and persist them to `config/devices.ini`.
 0. **Exit** — close the application.
 
 In a device menu:
@@ -275,7 +321,7 @@ In a device menu:
 5. **Toggle stream logging** — enable or disable data logging for the current run.
 0. **Back to device list** — return to the main device list.
 
-Runtime changes to refresh interval and stream logging are not saved back to `devices.ini`. Edit the configuration file and select **Reload configuration** to apply device definitions, including enabled/disabled status, and scan defaults. Reloading replaces runtime device edits with the values from the file. Changes to `bridge_dll` and `log_dir` require restarting.
+The frontend-neutral settings API persists validated general and device settings back to `devices.ini` while preserving unrelated comments and sections. The CLI exposes this through **Settings** as a proof of concept. Select **Reload configuration** after external edits; changes to `bridge_dll` and `log_dir` still require restarting.
 
 ## Configuration reference
 
@@ -293,6 +339,8 @@ scan_adapter_index=0
 scan_start_address=0x08
 scan_end_address=0x77
 scan_clock_hz=100000
+transfer_timeout_ms=500
+transfer_retries=0
 log_retention_days=30
 
 [device BMP280-1]
@@ -331,6 +379,15 @@ refresh_seconds=5
 log_stream=true
 enabled=true
 
+[device 24C32BN-1]
+type=24c32bn
+address=0x57
+clock_hz=100000
+adapter_index=0
+refresh_seconds=5
+log_stream=true
+enabled=false
+
 [device BQ4050-1]
 type=bq4050
 address=0x0B
@@ -346,17 +403,20 @@ enabled=false
 | Key | Meaning | Accepted values / default |
 |---|---|---|
 | `bridge_dll` | Path to Silicon Labs HID-to-SMBus DLL | Default: `bin\SLABHIDtoSMBus.dll` |
-| `log_dir` | Directory for audit and stream logs | Default: `logs` |
+| `log_dir` | Directory for audit and stream logs | Default: `logs`, resolved to the package root two levels above `bin\cli` or `bin\gui` |
 | `build_timestamp` | Build timestamp (`ddMMyyyyHHmm`) embedded in the CLI build label and release package name | Default: `000000000000`; updated only in CI packages |
 | `build_number` | CI pipeline run number embedded in the CLI build label | Default: `0`; unchanged by local builds |
 | `beta` | Whether the package is a beta build | Default: `false`; updated only in CI packages |
+| `dark_mode` | GUI theme persisted in the configuration file | `true` or `false`; default `false` |
+| `theme` | GUI theme selection | `default`, `light`, or `dark`; default `default` |
 | `default_refresh_seconds` | Default interval applied to device entries that do not override it | 1–3600; default `2` |
 | `default_log_stream` | Default stream logging choice for device entries | `true` or `false`; default `true` |
 | `scan_adapter_index` | Default CP2112 adapter used for scans; can be overridden at the scan prompt | 0–255; default `0` |
 | `scan_start_address` | Default first 7-bit I²C address for scans | `0x08`–`0x77`; default `0x08` |
 | `scan_end_address` | Default last 7-bit I²C address for scans | `0x08`–`0x77`, must be at least the start address; default `0x77` |
 | `scan_clock_hz` | Default scan bus speed | 1–400000 Hz; default `100000` |
-| `transfer_timeout_ms` | Maximum time allowed for each CP2112 transfer/probe before it is treated as failed; the full configured scan range is still visited | 1–60000 ms; default `500` |
+| `transfer_timeout_ms` | Default maximum time allowed for each CP2112 transfer/probe; can be overridden at the scan prompt. The value is limited by the CP2112 hardware maximum. | 1–1000 ms; default `500` |
+| `transfer_retries` | Default number of CP2112 hardware retries for each transfer; can be overridden at the scan prompt | 0–1000; default `0` |
 | `log_retention_days` | Automatically delete timestamped application log files at startup when their last-modified time is at least this many days old; oldest files are deleted first. `0` disables automatic cleanup. | 0–36500; default `30` |
 
 ### Device settings
@@ -364,7 +424,7 @@ enabled=false
 | Key | Meaning | Accepted values / default |
 |---|---|---|
 | Section name | Friendly name used in menus and log filenames | Example: `[device BMP280-1]` |
-| `type` | Selects the compiled-in driver | `bmp280`, `mpu6050`, `bh1750`, `ds3231`, `bq4050` |
+| `type` | Selects the compiled-in driver | `bmp280`, `mpu6050`, `bh1750`, `ds3231`, `bq4050`, `24c32bn`, `ssd1306` |
 | `address` | 7-bit I²C target address | Decimal or hexadecimal, e.g. `104` or `0x68`; normally `0x08`–`0x77` |
 | `clock_hz` | Requested bus clock | 1–400000 Hz; default `100000` |
 | `adapter_index` | CP2112 adapter index | Usually `0` when one adapter is attached |
@@ -386,7 +446,9 @@ These are common defaults; the actual address depends on the part and board stra
 | MPU-6050 | `0x68` or `0x69` |
 | BH1750 | `0x23` or `0x5C` |
 | DS3231 | `0x68` |
+| 24C32BN / AT24C32 EEPROM | `0x50`–`0x57` depending on address straps; `0x57` is common on DS3231 modules |
 | TI BQ4050 | `0x0B` (default Smart Battery address) |
+| SSD1306 OLED | `0x3C` or `0x3D`, selected by the module's SA0 strap |
 
 **Address conflict:** MPU-6050 and DS3231 commonly both use `0x68`. Two devices at the same address cannot normally share the same bus. Use a different valid address strap where supported, a separate adapter/bus, or an I²C multiplexer. The sample configuration disables the MPU-6050 for this reason. If AD0 is high, the MPU-6050 commonly responds at `0x69`.
 
@@ -430,6 +492,29 @@ Measurement duration and conversion behavior can vary by selected mode and senso
 
 The date/time input uses basic range checks; it does not fully validate month lengths or leap years. Verify the resulting RTC time after a write. Writing the RTC changes the device's stored clock.
 
+### 24C32BN / AT24C32 EEPROM
+
+- Reports static device capabilities through the structured driver result: 4096-byte capacity, 32-byte page size, 16-bit memory addresses, configured I²C address, and the lack of an ID or software-reset command.
+- Reads individual bytes and bounded streams of 1–512 bytes.
+- Writes individual bytes and arbitrary byte streams, splitting writes at 32-byte page boundaries and waiting for the EEPROM write cycle between pages.
+- Verifies a byte stream without modifying memory.
+- The driver does not expose a reset action because the 24C32BN has no software reset command. Power cycling or a hardware reset is required when applicable.
+
+The sample `24C32BN-1` configuration entry is disabled by default. Many DS3231 modules include an AT24C32 EEPROM at `0x57`; confirm the EEPROM is fitted and its address straps before enabling it.
+
+### SSD1306 I2C OLED display
+
+- Supports the common 128x64 monochrome SSD1306 command set: display on/off, software reset/reinitialization, contrast, orientation, power saving, display clock, page/column addressing, normal/inverse display, and text output.
+- `print-string` renders printable diagnostic text into a bounded 1024-byte host-side framebuffer before sending it in paced, CP2112-safe 16-byte data chunks for compatibility with SSD1306-compatible modules. Text supports a 5x7 font, scale 1–4, column/page placement, and monochrome on/off foreground color.
+- Common punctuation such as `!`, `@`, `?`, `#`, `$`, `%`, `&`, parentheses, quotes, commas, and arithmetic symbols is supported. Text wraps to subsequent display lines until the 128x64 framebuffer is full.
+- `off` means that the rendered pixels are cleared; it does not select a different physical color. Yellow/blue two-tone OLED modules use a fixed screen filter, so the SSD1306 still exposes only on/off monochrome pixels.
+- Structured driver information reports the display dimensions, framebuffer size, action-local buffered mode, transfer chunk size, important command registers, and hardware limitations.
+- Font size and color are rendering parameters rather than SSD1306 registers; they are supplied to `print-string` and are not persistent controller settings.
+- The SSD1306 does not provide a standard readable identity or calibration command. Its address cannot be changed through I²C; change the module's SA0 strap and update the configured address. The `set-address` action reports this limitation rather than claiming a software change.
+- The refresh action controls the SSD1306 display-clock divider, which is not a guaranteed physical refresh frequency in hertz.
+
+The sample `SSD1306-1` entry is disabled by default and uses the common `0x3C` address. Confirm the module resolution, controller variant, SA0 strap, reset wiring, and voltage levels before enabling it.
+
 ### TI BQ4050
 
 - Reads Smart Battery System (SBS) word commands at the configured 7-bit address (commonly `0x0B`).
@@ -447,7 +532,8 @@ SBS word values and ManufacturerData words are decoded little-endian. Manufactur
 If `log_stream=true`, or stream logging is enabled from the device menu, starting a stream creates a CSV file such as:
 
 ```text
-logs/BMP280-1_20261013_101530.csv
+logs/BMP280-1_cli_20261013_101530.csv
+logs/BMP280-1_gui_20261013_101531.csv
 ```
 
 The timestamp in the filename is the local system time when the stream log was opened. CSV rows contain:
@@ -465,14 +551,15 @@ A new file is created for each stream session, with the device name and session 
 The application creates a separate audit file such as:
 
 ```text
-logs/audit_20261013_101500.log
+logs/audit_cli_20261013_101500.log
+logs/audit_gui_20261013_101501.log
 ```
 
-Audit entries include timestamps for application startup/shutdown, configuration load, device selection, reads and writes initiated through menus, scan start/completion, stream start/stop, and runtime setting changes. The audit log is separate from the device CSV stream files.
+Audit entries include timestamps for application startup/shutdown, configuration load, device selection, reads and writes initiated through menus, scan start/completion, stream start/stop, and runtime setting changes. Driver-backed operations identify the configured device, its `type`, the driver title, operation/action, success state, and result or failure stage. The audit log is separate from the device CSV stream files.
 
 Logs use local Windows system time. Protect log files appropriately if they contain sensitive operational information.
 
-At startup, the application automatically removes its timestamped audit and stream log files that meet `log_retention_days`, oldest first. Set that option to `0` to disable automatic cleanup. Choose **Clean old logs** from the main menu to enter a one-time age in days; enter `0` to cancel. The currently open audit log is retained until a later run. Cleanup only targets files using the application's timestamped `audit_*.log` and `*_YYYYMMDD_HHMMSS.csv` naming patterns.
+At startup, the application automatically removes its timestamped frontend-specific audit and stream log files that meet `log_retention_days`, oldest first. Set that option to `0` to disable automatic cleanup. Choose **Clean old logs** from the main menu to enter a one-time age in days; enter `0` to cancel. The currently open audit log is retained until a later run. Cleanup targets both legacy timestamped names and the frontend-specific `audit_<frontend>_*.log` and `*_<frontend>_YYYYMMDD_HHMMSS.csv` patterns.
 
 ## Adding another device driver
 

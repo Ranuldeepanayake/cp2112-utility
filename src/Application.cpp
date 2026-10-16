@@ -23,6 +23,12 @@ std::string lower(std::string value) {
     return value;
 }
 
+// Gives every driver-backed audit entry a stable device and driver identity.
+std::string driverAuditContext(const DeviceConfig& device, const Driver& driver) {
+    return "device=\"" + device.name + "\" type=" + device.type +
+           " driver=\"" + driver.title() + "\"";
+}
+
 // Parses decimal or hexadecimal unsigned configuration values.
 bool parseUnsigned(const std::string& text, unsigned long& value) {
     try {
@@ -95,6 +101,10 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
             else if (key == "build_timestamp" && !value.empty()) config.buildTimestamp = value;
             else if (key == "build_number" && !value.empty()) config.buildNumber = value;
             else if (key == "beta" && parseBool(value, boolean)) config.betaBuild = boolean;
+            else if (key == "dark_mode" && parseBool(value, boolean)) config.darkMode = boolean;
+            else if (key == "theme" && (lower(value) == "default" || lower(value) == "light" || lower(value) == "dark")) {
+                config.theme = lower(value); config.darkMode = config.theme == "dark";
+            }
             else if (key == "default_refresh_seconds" && parseUnsigned(value, number) && number >= 1 && number <= 3600)
                 config.defaultRefreshSeconds = static_cast<unsigned>(number);
             else if (key == "default_log_stream" && parseBool(value, boolean))
@@ -107,8 +117,10 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
                 config.scanEndAddress = static_cast<unsigned>(number);
             else if (key == "scan_clock_hz" && parseUnsigned(value, number) && number >= 1 && number <= 400000)
                 config.scanClockHz = static_cast<unsigned>(number);
-            else if (key == "transfer_timeout_ms" && parseUnsigned(value, number) && number >= 1 && number <= 60000)
+            else if (key == "transfer_timeout_ms" && parseUnsigned(value, number) && number >= 1 && number <= 1000)
                 config.transferTimeoutMs = static_cast<unsigned>(number);
+            else if (key == "transfer_retries" && parseUnsigned(value, number) && number <= 1000)
+                config.transferRetries = static_cast<unsigned>(number);
             else if (key == "log_retention_days" && parseUnsigned(value, number) && number <= 36500)
                 config.logRetentionDays = static_cast<unsigned>(number);
             else {
@@ -161,7 +173,7 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
         names[normalizedName] = true;
         if (device.type != "bmp280" && device.type != "mpu6050" &&
             device.type != "bh1750" && device.type != "ds3231" &&
-            device.type != "bq4050") {
+            device.type != "bq4050" && device.type != "24c32bn" && device.type != "ssd1306") {
             error = "Unsupported device type '" + device.type + "' for " + device.name;
             return false;
         }
@@ -224,6 +236,52 @@ std::string resolveRelativePath(const std::string& path, const std::string& base
     return isAbsolutePath(path) ? path : absolutePath(baseDirectory + "\\" + path);
 }
 
+// Returns the directory containing the running frontend executable.
+std::string executableDirectory() {
+    char buffer[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameA(nullptr, buffer, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return {};
+    const std::string executablePath(buffer, length);
+    const size_t separator = executablePath.find_last_of("\\/");
+    return separator == std::string::npos ? std::string{} : executablePath.substr(0, separator);
+}
+
+// Resolves the common config path and falls back beside the executable when
+// the package intentionally keeps frontend-specific copies in bin\cli or bin\gui.
+std::string resolveBridgeDll(const std::string& configuredPath, const std::string& packageDirectory) {
+    const std::string packagePath = resolveRelativePath(configuredPath, packageDirectory);
+    if (regularFileExists(packagePath)) return packagePath;
+    const size_t separator = configuredPath.find_last_of("\\/");
+    const std::string filename = separator == std::string::npos
+        ? configuredPath
+        : configuredPath.substr(separator + 1);
+    const std::string executableDir = executableDirectory();
+    const std::string executablePath = executableDir.empty()
+        ? std::string{}
+        : executableDir + "\\" + filename;
+    return !executablePath.empty() && regularFileExists(executablePath)
+        ? executablePath
+        : packagePath;
+}
+
+bool settingUnsigned(const SettingValue& value, uint64_t& result) {
+    if (!std::holds_alternative<uint64_t>(value)) return false;
+    result = std::get<uint64_t>(value);
+    return true;
+}
+
+bool settingBoolean(const SettingValue& value, bool& result) {
+    if (!std::holds_alternative<bool>(value)) return false;
+    result = std::get<bool>(value);
+    return true;
+}
+
+bool settingString(const SettingValue& value, std::string& result) {
+    if (!std::holds_alternative<std::string>(value)) return false;
+    result = std::get<std::string>(value);
+    return !result.empty();
+}
+
 // Creates a directory and any missing parent directories using Windows APIs.
 bool ensureDirectory(const std::string& path, std::string& error) {
     if (path.empty()) {
@@ -259,15 +317,11 @@ bool ensureDirectory(const std::string& path, std::string& error) {
 // Recognizes the timestamped audit and stream log naming patterns.
 bool isTimestampedLog(const std::string& name) {
     const std::string filename = lower(name);
-    const bool audit = filename.size() == 6 + 15 + 4 &&
-        filename.compare(0, 6, "audit_") == 0 &&
+    const bool audit = filename.rfind("audit_", 0) == 0 &&
         filename.compare(filename.size() - 4, 4, ".log") == 0;
-    const bool stream = filename.size() >= 1 + 1 + 15 + 4 &&
-        filename.compare(filename.size() - 4, 4, ".csv") == 0;
-    if (!audit && !stream) return false;
-    const size_t timestampStart = audit ? 6 : filename.size() - 4 - 15 - 1;
-    if (stream && filename[timestampStart] != '_') return false;
-    const size_t digitsStart = audit ? timestampStart : timestampStart + 1;
+    const bool stream = filename.compare(filename.size() - 4, 4, ".csv") == 0;
+    if ((!audit && !stream) || filename.size() < 15 + 4) return false;
+    const size_t digitsStart = filename.size() - 4 - 15;
     for (size_t i = digitsStart; i < digitsStart + 15; ++i) {
         if (i == digitsStart + 8) {
             if (filename[i] != '_') return false;
@@ -346,13 +400,14 @@ ApplicationService::ApplicationService() = default;
 ApplicationService::~ApplicationService() = default;
 
 // Loads startup configuration, creates logging, validates prerequisites, and opens the CP2112 API.
-bool ApplicationService::initialize(const std::string& configPath, std::string& error) {
+bool ApplicationService::initialize(const std::string& configPath, std::string& error,
+                                    const std::string& frontendTag) {
     error.clear();
     configPath_ = absolutePath(configPath);
     AppConfig loaded;
     if (!loadConfig(configPath_, loaded, error)) return false;
     const std::string packageDirectory = packageBaseDirectory(configPath_);
-    loaded.bridgeDll = resolveRelativePath(loaded.bridgeDll, packageDirectory);
+    loaded.bridgeDll = resolveBridgeDll(loaded.bridgeDll, packageDirectory);
     loaded.logDir = resolveRelativePath(loaded.logDir, packageDirectory);
     config_ = std::move(loaded);
 
@@ -372,7 +427,7 @@ bool ApplicationService::initialize(const std::string& configPath, std::string& 
         return false;
     }
 
-    logger_ = std::make_unique<Logger>(config_.logDir);
+    logger_ = std::make_unique<Logger>(config_.logDir, frontendTag);
     if (!logger_->available()) {
         error = "Startup prerequisite warning: cannot create an audit log in '" +
                 config_.logDir + "'.";
@@ -409,7 +464,7 @@ bool ApplicationService::reload(std::string& error) {
         return false;
     }
     const std::string packageDirectory = packageBaseDirectory(configPath_);
-    loaded.bridgeDll = resolveRelativePath(loaded.bridgeDll, packageDirectory);
+    loaded.bridgeDll = resolveBridgeDll(loaded.bridgeDll, packageDirectory);
     loaded.logDir = resolveRelativePath(loaded.logDir, packageDirectory);
     bool restartRequired = false;
     size_t enabled = 0;
@@ -424,6 +479,7 @@ bool ApplicationService::reload(std::string& error) {
         config_.scanStartAddress = loaded.scanStartAddress;
         config_.scanEndAddress = loaded.scanEndAddress;
         config_.scanClockHz = loaded.scanClockHz;
+        config_.transferRetries = loaded.transferRetries;
         config_.buildTimestamp = loaded.buildTimestamp;
         config_.buildNumber = loaded.buildNumber;
         config_.betaBuild = loaded.betaBuild;
@@ -441,6 +497,175 @@ bool ApplicationService::reload(std::string& error) {
     if (restartRequired) {
         error = "Device definitions reloaded; bridge_dll and log_dir changes require restart.";
     }
+    return true;
+}
+
+// Updates one existing INI setting without rewriting unrelated comments or sections.
+bool ApplicationService::persistSetting(const std::string& section, const std::string& key,
+                                        const std::string& value, std::string& error) const {
+    std::ifstream input(configPath_);
+    if (!input) { error = "Could not read configuration file: " + configPath_; return false; }
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line)) lines.push_back(line);
+    const std::string expectedSection = lower(trim(section));
+    const std::string expectedKey = lower(trim(key));
+    std::string currentSection;
+    bool replaced = false;
+    for (std::string& currentLine : lines) {
+        const std::string normalized = trim(currentLine);
+        if (normalized.size() >= 2 && normalized.front() == '[' && normalized.back() == ']') {
+            currentSection = lower(trim(normalized.substr(1, normalized.size() - 2)));
+            continue;
+        }
+        const size_t equals = normalized.find('=');
+        if (!replaced && currentSection == expectedSection && equals != std::string::npos &&
+            lower(trim(normalized.substr(0, equals))) == expectedKey) {
+            currentLine = key + "=" + value;
+            replaced = true;
+        }
+    }
+    if (!replaced) {
+        error = "Configuration setting was not found: [" + section + "] " + key;
+        return false;
+    }
+
+    const std::string temporaryPath = configPath_ + ".tmp";
+    const auto writeLines = [&lines](const std::string& path) {
+        std::ofstream output(path, std::ios::trunc);
+        if (!output) return false;
+        for (const std::string& outputLine : lines) output << outputLine << "\n";
+        return static_cast<bool>(output);
+    };
+    {
+        std::ofstream output(temporaryPath, std::ios::trunc);
+        if (!output) { error = "Could not create temporary configuration file: " + temporaryPath; return false; }
+        for (const std::string& outputLine : lines) output << outputLine << "\n";
+        if (!output) {
+            output.close();
+            DeleteFileA(temporaryPath.c_str());
+            error = "Could not write temporary configuration file: " + temporaryPath;
+            return false;
+        }
+    }
+    if (!MoveFileExA(temporaryPath.c_str(), configPath_.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD replaceError = GetLastError();
+        // Some Windows processes temporarily deny replacement of an open INI file.
+        // Fall back to truncating the same file so settings can still be saved.
+        if (replaceError == ERROR_ACCESS_DENIED) {
+            const DWORD attributes = GetFileAttributesA(configPath_.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0) {
+                SetFileAttributesA(configPath_.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY);
+            }
+            if (writeLines(configPath_)) {
+                DeleteFileA(temporaryPath.c_str());
+                return true;
+            }
+        }
+        DeleteFileA(temporaryPath.c_str());
+        error = "Could not replace configuration file (Windows error " +
+                std::to_string(replaceError) + ")";
+        return false;
+    }
+    return true;
+}
+
+// Validates, persists, and applies an editable general setting.
+bool ApplicationService::updateGeneralSetting(const std::string& key, const SettingValue& value,
+                                               std::string& error) {
+    error.clear();
+    if (!initialized_) { error = "Application service is not initialized"; return false; }
+    const std::string normalized = lower(trim(key));
+    AppLockGuard lock(configMutex_);
+    const AppConfig previous = config_;
+    std::string serialized;
+    std::string text;
+    uint64_t number = 0;
+    bool boolean = false;
+    if (normalized == "bridge_dll" && settingString(value, text)) {
+        // Keep the standard package setting portable when a frontend displays
+        // the resolved copy from bin\cli or bin\gui and saves it unchanged.
+        const std::string normalizedText = lower(text);
+        const bool isStandardBridge = normalizedText.find("slabhidtosmbus.dll") != std::string::npos &&
+            (text == config_.bridgeDll || normalizedText.find("\\bin\\cli\\") != std::string::npos ||
+             normalizedText.find("/bin/cli/") != std::string::npos ||
+             normalizedText.find("\\bin\\gui\\") != std::string::npos ||
+             normalizedText.find("/bin/gui/") != std::string::npos);
+        serialized = isStandardBridge ? "bin\\SLABHIDtoSMBus.dll" : text;
+        config_.bridgeDll = resolveBridgeDll(serialized, packageBaseDirectory(configPath_));
+    } else if (normalized == "log_dir" && settingString(value, text)) {
+        serialized = text; config_.logDir = resolveRelativePath(text, packageBaseDirectory(configPath_));
+    } else if (normalized == "default_refresh_seconds" && settingUnsigned(value, number) && number >= 1 && number <= 3600) {
+        serialized = std::to_string(number); config_.defaultRefreshSeconds = static_cast<unsigned>(number);
+    } else if (normalized == "default_log_stream" && settingBoolean(value, boolean)) {
+        serialized = boolean ? "true" : "false"; config_.defaultLogStream = boolean;
+    } else if (normalized == "dark_mode" && settingBoolean(value, boolean)) {
+        serialized = boolean ? "true" : "false"; config_.darkMode = boolean; config_.theme = boolean ? "dark" : "default";
+    } else if (normalized == "theme" && settingString(value, text) &&
+               (lower(text) == "default" || lower(text) == "light" || lower(text) == "dark")) {
+        serialized = lower(text); config_.theme = serialized; config_.darkMode = serialized == "dark";
+    } else if (normalized == "scan_adapter_index" && settingUnsigned(value, number) && number <= 255) {
+        serialized = std::to_string(number); config_.scanAdapterIndex = static_cast<unsigned>(number);
+    } else if (normalized == "scan_start_address" && settingUnsigned(value, number) && number >= 0x08 && number <= config_.scanEndAddress) {
+        serialized = hex(static_cast<unsigned>(number)); config_.scanStartAddress = static_cast<unsigned>(number);
+    } else if (normalized == "scan_end_address" && settingUnsigned(value, number) && number >= config_.scanStartAddress && number <= 0x77) {
+        serialized = hex(static_cast<unsigned>(number)); config_.scanEndAddress = static_cast<unsigned>(number);
+    } else if (normalized == "scan_clock_hz" && settingUnsigned(value, number) && number >= 1 && number <= 400000) {
+        serialized = std::to_string(number); config_.scanClockHz = static_cast<unsigned>(number);
+    } else if (normalized == "transfer_timeout_ms" && settingUnsigned(value, number) && number >= 1 && number <= 1000) {
+        serialized = std::to_string(number); config_.transferTimeoutMs = static_cast<unsigned>(number);
+    } else if (normalized == "transfer_retries" && settingUnsigned(value, number) && number <= 1000) {
+        serialized = std::to_string(number); config_.transferRetries = static_cast<unsigned>(number);
+    } else if (normalized == "log_retention_days" && settingUnsigned(value, number) && number <= 36500) {
+        serialized = std::to_string(number); config_.logRetentionDays = static_cast<unsigned>(number);
+    } else {
+        error = "Invalid or read-only general setting: " + key;
+        return false;
+    }
+    if (!persistSetting("general", normalized, serialized, error)) {
+        config_ = previous;
+        return false;
+    }
+    if (logger_) logger_->audit("General setting updated: " + normalized + "=" + serialized);
+    return true;
+}
+
+// Validates, persists, and applies an editable device setting.
+bool ApplicationService::updateDeviceSetting(size_t deviceIndex, const std::string& key,
+                                              const SettingValue& value, std::string& error) {
+    error.clear();
+    if (!initialized_) { error = "Application service is not initialized"; return false; }
+    const std::string normalized = lower(trim(key));
+    AppLockGuard lock(configMutex_);
+    if (deviceIndex >= config_.devices.size()) { error = "Device index is out of range"; return false; }
+    DeviceConfig& device = config_.devices[deviceIndex];
+    const DeviceConfig previous = device;
+    std::string serialized;
+    uint64_t number = 0;
+    bool boolean = false;
+    if (normalized == "address" && settingUnsigned(value, number) && number >= 0x08 && number <= 0x77) {
+        serialized = hex(static_cast<unsigned>(number)); device.address = static_cast<unsigned>(number);
+    } else if (normalized == "clock_hz" && settingUnsigned(value, number) && number >= 1 && number <= 400000) {
+        serialized = std::to_string(number); device.clock = static_cast<DWORD>(number);
+    } else if (normalized == "refresh_seconds" && settingUnsigned(value, number) && number >= 1 && number <= 3600) {
+        serialized = std::to_string(number); device.refreshSeconds = static_cast<unsigned>(number);
+    } else if (normalized == "adapter_index" && settingUnsigned(value, number) && number <= 255) {
+        serialized = std::to_string(number); device.adapterIndex = static_cast<unsigned>(number);
+    } else if (normalized == "log_stream" && settingBoolean(value, boolean)) {
+        serialized = boolean ? "true" : "false"; device.logStream = boolean;
+    } else if (normalized == "enabled" && settingBoolean(value, boolean)) {
+        serialized = boolean ? "true" : "false"; device.enabled = boolean;
+    } else {
+        error = "Invalid or read-only device setting: " + key;
+        return false;
+    }
+    if (!persistSetting("device " + device.name, normalized, serialized, error)) {
+        device = previous;
+        return false;
+    }
+    if (logger_) logger_->audit("Device setting updated: " + device.name + ": " + normalized + "=" + serialized);
     return true;
 }
 
@@ -468,6 +693,38 @@ bool ApplicationService::adapters(std::vector<AdapterInformation>& result, std::
         info.attributeStatus = api_.getAttributes(index, DEFAULT_VID, DEFAULT_PID,
                                                   &info.vid, &info.pid, &info.release);
         info.attributesAvailable = info.attributeStatus == 0;
+
+        // Read device and library metadata without changing any persistent
+        // USB configuration. Each adapter must be opened for part details.
+        DeviceHandle handle(api_);
+        const Status openStatus = api_.open(handle.address(), index, DEFAULT_VID, DEFAULT_PID);
+        if (openStatus == 0 && handle.get()) {
+            info.partNumberStatus = api_.getPartNumber(handle.get(), &info.partNumber, &info.partVersion);
+            info.partNumberAvailable = info.partNumberStatus == 0;
+            info.usbConfigStatus = api_.getUsbConfig(handle.get(), &info.configuredVid,
+                                                     &info.configuredPid, &info.configuredPower,
+                                                     &info.configuredPowerMode, &info.configuredRelease);
+            info.usbConfigAvailable = info.usbConfigStatus == 0;
+            info.lockStatus = api_.getLock(handle.get(), &info.lockBits);
+            info.lockAvailable = info.lockStatus == 0;
+            info.smbusConfigStatus = api_.getSmbusConfig(
+                handle.get(), &info.smbusBitRate, &info.smbusAddress,
+                &info.smbusAutoReadRespond, &info.smbusWriteTimeout,
+                &info.smbusReadTimeout, &info.smbusSclLowTimeout,
+                &info.smbusTransferRetries);
+            info.smbusConfigAvailable = info.smbusConfigStatus == 0;
+        } else {
+            info.partNumberStatus = openStatus;
+            info.usbConfigStatus = openStatus;
+            info.lockStatus = openStatus;
+            info.smbusConfigStatus = openStatus;
+        }
+        info.smbusLibraryVersionStatus = api_.getLibraryVersion(
+            &info.smbusLibraryMajor, &info.smbusLibraryMinor, &info.smbusLibraryRelease);
+        info.smbusLibraryVersionAvailable = info.smbusLibraryVersionStatus == 0;
+        info.hidLibraryVersionStatus = api_.getHidLibraryVersion(
+            &info.hidLibraryMajor, &info.hidLibraryMinor, &info.hidLibraryRelease);
+        info.hidLibraryVersionAvailable = info.hidLibraryVersionStatus == 0;
         result.push_back(std::move(info));
     }
     return true;
@@ -501,23 +758,46 @@ bool ApplicationService::openDevice(const DeviceConfig& config, Device& handle,
 }
 
 // Performs one driver-defined read for a configured device.
-bool ApplicationService::readDevice(size_t deviceIndex, std::string& result, std::string& error) {
+bool ApplicationService::readDeviceResult(size_t deviceIndex, DeviceResult& result,
+                                          std::string& error) {
     error.clear();
+    result = {};
     DeviceConfig device;
     if (!getDevice(deviceIndex, device, error)) return false;
-    AppLockGuard hardwareLock(hardwareMutex_);
-    DeviceHandle handle(api_);
-    if (!openDevice(device, *handle.address(), error)) return false;
-    Bus bus(api_, handle.get(), config_.transferTimeoutMs);
-    if (!bus.setClock(device.clock)) {
-        error = "Failed to set bus clock for " + device.name;
+    std::unique_ptr<Driver> driver = makeDriver(device.type);
+    if (!driver) {
+        error = "No driver registered for " + device.type;
+        if (logger_) logger_->audit("Driver-backed read failed device=\"" + device.name +
+                                    "\" type=" + device.type + " reason=\"" + error + "\"");
         return false;
     }
-    std::unique_ptr<Driver> driver = makeDriver(device.type);
-    if (!driver) { error = "No driver registered for " + device.type; return false; }
-    result = driver->readStream(bus, device);
-    if (logger_) logger_->audit(device.name + ": " + result);
-    return true;
+    AppLockGuard hardwareLock(hardwareMutex_);
+    DeviceHandle handle(api_);
+    if (!openDevice(device, *handle.address(), error)) {
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=read succeeded=false stage=open error=\"" + error + "\"");
+        return false;
+    }
+    Bus bus(api_, handle.get(), config_.transferTimeoutMs, config_.transferRetries);
+    if (!bus.setClock(device.clock)) {
+        error = "Failed to set bus clock for " + device.name;
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=read succeeded=false stage=configure error=\"" + error + "\"");
+        return false;
+    }
+    const bool succeeded = driver->readResult(bus, device, result);
+    if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                               " operation=read succeeded=" + (succeeded ? "true" : "false") +
+                               " result=\"" + formatDeviceResult(result) + "\"");
+    return succeeded;
+}
+
+// Formats the structured result for the existing console-facing API.
+bool ApplicationService::readDevice(size_t deviceIndex, std::string& result, std::string& error) {
+    DeviceResult structured;
+    const bool succeeded = readDeviceResult(deviceIndex, structured, error);
+    result = formatDeviceResult(structured);
+    return succeeded;
 }
 
 // Returns the metadata and actions exposed by a configured device driver.
@@ -531,6 +811,7 @@ bool ApplicationService::driverInformation(size_t deviceIndex, DriverInformation
     result.title = driver->title();
     result.capabilities = driver->capabilities();
     result.actions = driver->actions();
+    result.registers = driver->registers();
     return true;
 }
 
@@ -542,55 +823,88 @@ bool ApplicationService::executeDeviceAction(size_t deviceIndex, const std::stri
     result.clear();
     DeviceConfig device;
     if (!getDevice(deviceIndex, device, error)) return false;
-    AppLockGuard hardwareLock(hardwareMutex_);
-    DeviceHandle handle(api_);
-    if (!openDevice(device, *handle.address(), error)) return false;
-    Bus bus(api_, handle.get(), config_.transferTimeoutMs);
-    if (!bus.setClock(device.clock)) {
-        error = "Failed to set bus clock for " + device.name;
+    std::unique_ptr<Driver> driver = makeDriver(device.type);
+    if (!driver) {
+        error = "No driver registered for " + device.type;
+        if (logger_) logger_->audit("Driver-backed action failed device=\"" + device.name +
+                                    "\" type=" + device.type + " action=" + action +
+                                    " reason=\"" + error + "\"");
         return false;
     }
-    std::unique_ptr<Driver> driver = makeDriver(device.type);
-    if (!driver) { error = "No driver registered for " + device.type; return false; }
+    AppLockGuard hardwareLock(hardwareMutex_);
+    DeviceHandle handle(api_);
+    if (!openDevice(device, *handle.address(), error)) {
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=action action=" + action +
+                                   " succeeded=false stage=open error=\"" + error + "\"");
+        return false;
+    }
+    Bus bus(api_, handle.get(), config_.transferTimeoutMs, config_.transferRetries);
+    if (!bus.setClock(device.clock)) {
+        error = "Failed to set bus clock for " + device.name;
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=action action=" + action +
+                                   " succeeded=false stage=configure error=\"" + error + "\"");
+        return false;
+    }
     const bool succeeded = driver->executeAction(bus, device, action, parameters, result);
-    if (logger_) logger_->audit(device.name + ": " + result);
+    if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                               " operation=action action=" + action +
+                               " succeeded=" + (succeeded ? "true" : "false") +
+                               " result=\"" + result + "\"");
     return succeeded;
 }
 
-// Reads one byte from a register using the scan adapter and configured timeout.
+// Reads a bounded response from an arbitrary register using the scan adapter.
+// The requested length is part of the transfer contract: CP2112 uses it to
+// complete the SMBus read and generate the final bus response condition.
 bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerAddress,
-                                      BYTE& value, std::string& error) {
+                                      unsigned expectedBytes, std::vector<BYTE>& values,
+                                      std::string& error) {
     error.clear();
+    values.clear();
+    const auto auditFailure = [this](const std::string& detail) {
+        if (logger_) logger_->audit("Direct register read failed: " + detail);
+    };
     if (!initialized_) { error = "Application service is not initialized"; return false; }
     const AppConfig config = this->config();
-    if (deviceAddress < 0x08 || deviceAddress > 0x77 || registerAddress > 0xFF) {
-        error = "Device address must be 0x08..0x77 and register address must be 0x00..0xFF";
-        return false;
+    if (deviceAddress < 0x08 || deviceAddress > 0x77 || registerAddress > 0xFF ||
+        expectedBytes < 1 || expectedBytes > 512) {
+        error = "Device address must be 0x08..0x77, register address 0x00..0xFF, and expected bytes 1..512";
+        auditFailure(error); return false;
     }
     AppLockGuard hardwareLock(hardwareMutex_);
     if (config.scanAdapterIndex >= adapterCount_) {
         error = "No CP2112 adapter is connected at the configured adapter index";
-        return false;
+        auditFailure(error); return false;
     }
     DeviceHandle handle(api_);
     const Status status = api_.open(handle.address(), config.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID);
     if (status != 0 || !handle.get()) {
         error = "Could not open adapter for direct read; status=" + std::to_string(status);
-        return false;
+        auditFailure(error); return false;
     }
-    Bus bus(api_, handle.get(), config.transferTimeoutMs);
+    Bus bus(api_, handle.get(), config.transferTimeoutMs, config.transferRetries);
     if (!bus.setClock(config.scanClockHz)) {
         error = "Failed to set bus clock for direct read";
-        return false;
+        auditFailure(error); return false;
     }
-    std::vector<BYTE> data;
-    if (!bus.read(deviceAddress, registerAddress, 1, 1, data) || data.empty()) {
+    if (!bus.read(deviceAddress, registerAddress, 1, expectedBytes, values) || values.empty()) {
         error = "Read failed at device " + hex(deviceAddress) + ", register " + hex(registerAddress);
-        return false;
+        auditFailure(error); return false;
     }
-    value = data.front();
     if (logger_) logger_->audit("Direct register read device=" + hex(deviceAddress) +
-                               " register=" + hex(registerAddress) + " value=" + hex(value));
+                               " register=" + hex(registerAddress) +
+                               " bytes=" + std::to_string(values.size()));
+    return true;
+}
+
+// Compatibility wrapper for the CLI's existing one-byte register command.
+bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerAddress,
+                                      BYTE& value, std::string& error) {
+    std::vector<BYTE> values;
+    if (!readRegister(deviceAddress, registerAddress, 1, values, error)) return false;
+    value = values.front();
     return true;
 }
 
@@ -598,31 +912,34 @@ bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerA
 bool ApplicationService::writeRegister(unsigned deviceAddress, unsigned registerAddress,
                                        BYTE value, std::string& error) {
     error.clear();
+    const auto auditFailure = [this](const std::string& detail) {
+        if (logger_) logger_->audit("Direct register write failed: " + detail);
+    };
     if (!initialized_) { error = "Application service is not initialized"; return false; }
     const AppConfig config = this->config();
     if (deviceAddress < 0x08 || deviceAddress > 0x77 || registerAddress > 0xFF) {
         error = "Device address must be 0x08..0x77 and register address must be 0x00..0xFF";
-        return false;
+        auditFailure(error); return false;
     }
     AppLockGuard hardwareLock(hardwareMutex_);
     if (config.scanAdapterIndex >= adapterCount_) {
         error = "No CP2112 adapter is connected at the configured adapter index";
-        return false;
+        auditFailure(error); return false;
     }
     DeviceHandle handle(api_);
     const Status status = api_.open(handle.address(), config.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID);
     if (status != 0 || !handle.get()) {
         error = "Could not open adapter for direct write; status=" + std::to_string(status);
-        return false;
+        auditFailure(error); return false;
     }
-    Bus bus(api_, handle.get(), config.transferTimeoutMs);
+    Bus bus(api_, handle.get(), config.transferTimeoutMs, config.transferRetries);
     if (!bus.setClock(config.scanClockHz)) {
         error = "Failed to set bus clock for direct write";
-        return false;
+        auditFailure(error); return false;
     }
     if (!bus.writeReg(deviceAddress, static_cast<BYTE>(registerAddress), value)) {
         error = "Write failed at device " + hex(deviceAddress) + ", register " + hex(registerAddress);
-        return false;
+        auditFailure(error); return false;
     }
     if (logger_) logger_->audit("Direct register write device=" + hex(deviceAddress) +
                                " register=" + hex(registerAddress) + " value=" + hex(value));
@@ -630,52 +947,79 @@ bool ApplicationService::writeRegister(unsigned deviceAddress, unsigned register
 }
 
 // Streams driver readings until the caller's stop flag is set.
-bool ApplicationService::streamDevice(size_t deviceIndex, std::atomic<bool>& stop,
-                                      const StreamCallback& callback, std::string& error) {
+bool ApplicationService::streamDeviceStructured(size_t deviceIndex, std::atomic<bool>& stop,
+                                                const StructuredStreamCallback& callback,
+                                                std::string& error) {
     error.clear();
     DeviceConfig device;
     if (!getDevice(deviceIndex, device, error)) return false;
-    AppLockGuard hardwareLock(hardwareMutex_);
-    DeviceHandle handle(api_);
-    if (!openDevice(device, *handle.address(), error)) return false;
-    Bus bus(api_, handle.get(), config_.transferTimeoutMs);
-    if (!bus.setClock(device.clock)) {
-        error = "Failed to set bus clock for " + device.name;
+    std::unique_ptr<Driver> driver = makeDriver(device.type);
+    if (!driver) {
+        error = "No driver registered for " + device.type;
+        if (logger_) logger_->audit("Driver-backed stream failed device=\"" + device.name +
+                                    "\" type=" + device.type + " reason=\"" + error + "\"");
         return false;
     }
-    std::unique_ptr<Driver> driver = makeDriver(device.type);
-    if (!driver) { error = "No driver registered for " + device.type; return false; }
+    AppLockGuard hardwareLock(hardwareMutex_);
+    DeviceHandle handle(api_);
+    if (!openDevice(device, *handle.address(), error)) {
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=stream-start succeeded=false stage=open error=\"" + error + "\"");
+        return false;
+    }
+    Bus bus(api_, handle.get(), config_.transferTimeoutMs, config_.transferRetries);
+    if (!bus.setClock(device.clock)) {
+        error = "Failed to set bus clock for " + device.name;
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                   " operation=stream-start succeeded=false stage=configure error=\"" + error + "\"");
+        return false;
+    }
 
     std::unique_ptr<std::ofstream> streamLog;
     if (device.logStream) {
         streamLog = logger_->openDeviceLog(device);
         if (!*streamLog) {
-            logger_->audit("Could not open stream log for " + device.name);
+            logger_->audit(driverAuditContext(device, *driver) +
+                           " operation=stream-log-open succeeded=false");
             streamLog.reset();
         }
     }
-    logger_->audit("Started stream for " + device.name + " interval=" +
+    logger_->audit(driverAuditContext(device, *driver) + " operation=stream-start interval=" +
                    std::to_string(device.refreshSeconds) + "s logging=" +
                    (device.logStream ? "on" : "off"));
     while (!stop.load()) {
-        const std::string value = driver->readStream(bus, device);
+        DeviceResult value;
+        driver->readResult(bus, device, value);
         const std::string timestampValue = timestamp();
         callback(timestampValue, value);
+        const std::string displayValue = formatDeviceResult(value);
         if (streamLog && *streamLog) {
             *streamLog << "\"" << timestampValue << "\",\"" << device.name
                        << "\",\"" << device.type << "\",\"" << hex(device.address)
-                       << "\",\"" << value << "\"\n";
+                       << "\",\"" << displayValue << "\"\n";
             streamLog->flush();
         }
         for (unsigned i = 0; i < device.refreshSeconds * 10 && !stop.load(); ++i) Sleep(100);
     }
-    logger_->audit("Stopped stream for " + device.name);
+    logger_->audit(driverAuditContext(device, *driver) + " operation=stream-stop");
     return true;
+}
+
+// Preserves the original string callback for the CLI while using structured
+// results internally and exposing them directly to future frontends.
+bool ApplicationService::streamDevice(size_t deviceIndex, std::atomic<bool>& stop,
+                                      const StreamCallback& callback, std::string& error) {
+    return streamDeviceStructured(deviceIndex, stop,
+        [&callback](const std::string& when, const DeviceResult& result) {
+            callback(when, formatDeviceResult(result));
+        }, error);
 }
 
 // Probes each configured I2C address with bounded transfers and optional progress reporting.
 bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReading>& result,
-                              std::string& error, const ScanProgressCallback& progress) {
+                              std::string& error, const ScanProgressCallback& progress,
+                              std::atomic<bool>* cancelRequested,
+                              const ScanReadingCallback& readingProgress) {
     error.clear();
     if (!initialized_) { error = "Application service is not initialized"; return false; }
     AppLockGuard hardwareLock(hardwareMutex_);
@@ -686,7 +1030,7 @@ bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReadin
     if (options.adapterIndex >= adapterCount_) { error = "Scan adapter index is out of range"; return false; }
     if (options.startAddress < 0x08 || options.endAddress > 0x77 ||
         options.startAddress > options.endAddress || options.clockHz < 1 || options.clockHz > 400000 ||
-        options.transferTimeoutMs < 1) {
+        options.transferTimeoutMs < 1 || options.transferTimeoutMs > 1000 || options.transferRetries > 1000) {
         error = "Invalid scan address range or bus clock";
         return false;
     }
@@ -696,45 +1040,69 @@ bool ApplicationService::scan(const ScanOptions& options, std::vector<ScanReadin
         error = "Could not open adapter for scan; status=" + std::to_string(status);
         return false;
     }
-    Bus bus(api_, handle.get(), options.transferTimeoutMs);
+    Bus bus(api_, handle.get(), options.transferTimeoutMs, options.transferRetries, cancelRequested);
     if (!bus.setClock(options.clockHz)) { error = "Failed to set bus clock for scan"; return false; }
 
     if (logger_) {
         logger_->audit("Starting read-probe scan " + hex(options.startAddress) + "-" +
-                       hex(options.endAddress) + " at " + std::to_string(options.clockHz) + " Hz");
+                       hex(options.endAddress) + " at " + std::to_string(options.clockHz) +
+                       " Hz, timeout=" + std::to_string(options.transferTimeoutMs) +
+                       " ms, retries=" + std::to_string(options.transferRetries));
     }
     result.clear();
     for (unsigned address = options.startAddress; address <= options.endAddress; ++address) {
-        if (progress) progress(address);
+        if (progress && !progress(address)) {
+            error = "Scan cancelled by user.";
+            if (logger_) logger_->audit("I2C scan cancelled by user");
+            break;
+        }
         std::vector<BYTE> data;
         ScanReading reading;
         reading.address = address;
-        reading.readSucceeded = bus.read(address, 0x00, 1, 1, data);
+        reading.readSucceeded = bus.read(address, 0x00, 1, 1, data, &reading.transfer);
         if (reading.readSucceeded) reading.value = data[0];
         result.push_back(reading);
+        if (readingProgress && !readingProgress(reading)) {
+            error = "Scan cancelled by user.";
+            if (logger_) logger_->audit("I2C scan cancelled by user");
+            break;
+        }
+        if (reading.transfer.cancelled) {
+            error = "Scan cancelled by user.";
+            if (logger_) logger_->audit("I2C scan cancelled during transfer");
+            break;
+        }
     }
     const size_t hits = static_cast<size_t>(std::count_if(
         result.begin(), result.end(), [](const ScanReading& reading) { return reading.readSucceeded; }));
-    if (logger_) logger_->audit("I2C scan complete; successful read probes=" + std::to_string(hits));
+    if (logger_) {
+        logger_->audit("I2C scan complete; successful read probes=" + std::to_string(hits));
+        for (const ScanReading& reading : result) {
+            const TransferDiagnostics& transfer = reading.transfer;
+            logger_->audit("I2C scan diagnostic address=" + hex(reading.address) +
+                           " result=" + (reading.readSucceeded ? "found" : "not-found") +
+                           " api_status=" + std::to_string(transfer.apiStatus) +
+                           " state=" + std::to_string(transfer.transferState) +
+                           " detail=" + std::to_string(transfer.detailedStatus) +
+                           " retries=" + std::to_string(transfer.retries) +
+                           " bytes=" + std::to_string(transfer.bytesTransferred) +
+                           " timeout=" + (transfer.timedOut ? "true" : "false") +
+                           " cancelled=" + (transfer.cancelled ? "true" : "false"));
+            if (reading.readSucceeded) {
+                logger_->audit("I2C scan found device address=" + hex(reading.address) +
+                               " (" + std::to_string(reading.address) + ") value=" +
+                               hex(reading.value));
+            }
+        }
+    }
     return true;
 }
 
 // Applies temporary refresh and logging settings to one configured device.
 bool ApplicationService::updateRuntimeDevice(size_t deviceIndex, unsigned refreshSeconds,
                                              bool logStream, std::string& error) {
-    error.clear();
-    if (!initialized_) { error = "Application service is not initialized"; return false; }
-    AppLockGuard lock(configMutex_);
-    if (deviceIndex >= config_.devices.size()) { error = "Device index is out of range"; return false; }
-    if (refreshSeconds < 1 || refreshSeconds > 3600) {
-        error = "Refresh interval must be between 1 and 3600 seconds";
-        return false;
-    }
-    DeviceConfig& device = config_.devices[deviceIndex];
-    device.refreshSeconds = refreshSeconds;
-    device.logStream = logStream;
-    if (logger_) logger_->audit("Runtime settings changed for " + device.name);
-    return true;
+    if (!updateDeviceSetting(deviceIndex, "refresh_seconds", static_cast<uint64_t>(refreshSeconds), error)) return false;
+    return updateDeviceSetting(deviceIndex, "log_stream", logStream, error);
 }
 
 // Deletes old logs through the service logger and records the cleanup result.
@@ -747,5 +1115,33 @@ bool ApplicationService::cleanLogs(unsigned days, LogCleanupResult& result, std:
     logger_->audit("Manual log cleanup: deleted " + std::to_string(result.deleted) +
                    " log file(s) older than " + std::to_string(days) +
                    " day(s); failures=" + std::to_string(result.failed));
+    return true;
+}
+
+// Deletes all timestamped audit and stream logs except the currently open audit log.
+bool ApplicationService::clearAllLogs(LogCleanupResult& result, std::string& error) {
+    error.clear();
+    if (!initialized_ || !logger_) { error = "Application service is not initialized"; return false; }
+    result = {};
+    const AppConfig config = this->config();
+    const std::string activeAudit = logger_->auditPath();
+    const std::string pattern = config.logDir + "\\*";
+    WIN32_FIND_DATAA entry{};
+    HANDLE search = FindFirstFileA(pattern.c_str(), &entry);
+    if (search == INVALID_HANDLE_VALUE) {
+        const DWORD status = GetLastError();
+        if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) return true;
+        error = "Could not enumerate log directory (Windows error " + std::to_string(status) + ")";
+        return false;
+    }
+    do {
+        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 || !isTimestampedLog(entry.cFileName)) continue;
+        const std::string path = config.logDir + "\\" + entry.cFileName;
+        if (lower(path) == lower(activeAudit)) continue;
+        if (DeleteFileA(path.c_str())) ++result.deleted; else ++result.failed;
+    } while (FindNextFileA(search, &entry));
+    FindClose(search);
+    logger_->audit("Manual log clear: deleted " + std::to_string(result.deleted) +
+                   " log file(s); failures=" + std::to_string(result.failed));
     return true;
 }
