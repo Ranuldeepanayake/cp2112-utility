@@ -7,17 +7,24 @@
 struct Bh1750Driver : Driver {
     std::string title() const override { return "BH1750 illuminance sensor"; }
     std::string capabilities() const override { return "Trigger high-resolution measurement; read lux; set power and measurement mode"; }
+    std::vector<DriverRegister> registers() const override {
+        return {{0x01, "POWER_ON", "Power-on command", false, true},
+                {0x10, "CONT_H_RES", "Continuous high-resolution measurement command", false, true},
+                {0x00, "POWER_DOWN", "Power-down command", false, true},
+                {0x07, "RESET", "Reset measurement data register", false, true},
+                {0x00, "DATA", "Two-byte raw illuminance response (command-based)", true, false}};
+    }
 
-    std::string readStream(Bus& bus, const DeviceConfig& d) override {
-        if (!bus.writeCommand(d.address, 0x01)) return "ERROR: power-on command failed";
-        if (!bus.writeCommand(d.address, 0x10)) return "ERROR: measurement command failed";
+    bool readResult(Bus& bus, const DeviceConfig& d, DeviceResult& result) override {
+        if (!bus.writeCommand(d.address, 0x01)) { result.error = "power-on command failed"; return false; }
+        if (!bus.writeCommand(d.address, 0x10)) { result.error = "measurement command failed"; return false; }
         Sleep(180);
         std::vector<BYTE> bytes;
-        if (!bus.rawRead(d.address, 2, bytes)) return "ERROR: I2C read failed";
+        if (!bus.rawRead(d.address, 2, bytes)) { result.error = "I2C read failed"; return false; }
         const unsigned raw = (static_cast<unsigned>(bytes[0]) << 8) | bytes[1];
-        std::ostringstream output;
-        output << "raw=" << raw << ", illuminance_lux=" << std::fixed << std::setprecision(2) << raw / 1.2;
-        return output.str();
+        result.succeeded = true;
+        result.add("illuminance_lux", raw / 1.2, "lux", static_cast<uint64_t>(raw));
+        return true;
     }
 
     std::vector<DriverAction> actions() const override {

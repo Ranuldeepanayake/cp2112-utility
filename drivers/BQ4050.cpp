@@ -88,8 +88,20 @@ struct Bq4050Driver : Driver {
     std::string capabilities() const override {
         return "Read SBS telemetry, BQ4050 protection/status flags, per-cell measurements and temperatures; confirmed LED display test commands";
     }
+    std::vector<DriverRegister> registers() const override {
+        return {{0x03, "BATTERY_MODE", "Battery operating and capacity mode", true, false},
+                {0x08, "TEMPERATURE", "Battery temperature", true, false},
+                {0x09, "VOLTAGE", "Pack voltage", true, false},
+                {0x0A, "CURRENT", "Signed pack current", true, false},
+                {0x0D, "RELATIVE_SOC", "Relative state of charge", true, false},
+                {0x0F, "REMAINING_CAPACITY", "Remaining capacity", true, false},
+                {0x10, "FULL_CHARGE_CAPACITY", "Full charge capacity", true, false},
+                {0x16, "BATTERY_STATUS", "Battery status flags", true, false},
+                {0x17, "CYCLE_COUNT", "Charge cycle count", true, false},
+                {0x23, "MANUFACTURER_DATA", "Manufacturer subcommand response data", true, true}};
+    }
 
-    std::string readStream(Bus& bus, const DeviceConfig& d) override {
+    bool readResult(Bus& bus, const DeviceConfig& d, DeviceResult& result) override {
         unsigned batteryMode = 0, temperature = 0, voltage = 0, current = 0, relativeSoc = 0;
         unsigned remainingCapacity = 0, fullChargeCapacity = 0, batteryStatus = 0, cycleCount = 0;
         if (!readWord(bus, d, COMMAND_BATTERY_MODE, batteryMode) ||
@@ -101,7 +113,8 @@ struct Bq4050Driver : Driver {
             !readWord(bus, d, COMMAND_FULL_CHARGE_CAPACITY, fullChargeCapacity) ||
             !readWord(bus, d, COMMAND_BATTERY_STATUS, batteryStatus) ||
             !readWord(bus, d, COMMAND_CYCLE_COUNT, cycleCount)) {
-            return "ERROR: SMBus word read failed";
+            result.error = "SMBus word read failed";
+            return false;
         }
 
         const double temperatureC = deciKelvinToCelsius(temperature);
@@ -120,6 +133,17 @@ struct Bq4050Driver : Driver {
                << ", battery_status=" << hex(batteryStatus, 4)
                << ", cycle_count=" << cycleCount;
 
+        result.succeeded = true;
+        result.add("battery_mode", static_cast<uint64_t>(batteryMode), {}, static_cast<uint64_t>(batteryMode));
+        result.add("temperature_c", temperatureC, "C", static_cast<uint64_t>(temperature));
+        result.add("voltage_v", voltage / 1000.0, "V", static_cast<uint64_t>(voltage));
+        result.add("current_ma", static_cast<int64_t>(currentMa), "mA", static_cast<int64_t>(currentMa));
+        result.add("relative_soc_percent", static_cast<uint64_t>(relativeSoc), "%");
+        result.add("remaining_capacity", static_cast<uint64_t>(remainingCapacity), capacityUnit);
+        result.add("full_charge_capacity", static_cast<uint64_t>(fullChargeCapacity), capacityUnit);
+        result.add("battery_status", static_cast<uint64_t>(batteryStatus), {}, static_cast<uint64_t>(batteryStatus));
+        result.add("cycle_count", static_cast<uint64_t>(cycleCount));
+
         const unsigned statusCommands[] = {
             MAC_SAFETY_ALERT, MAC_SAFETY_STATUS, MAC_PF_ALERT, MAC_PF_STATUS,
             MAC_OPERATION_STATUS, MAC_CHARGING_STATUS, MAC_GAUGING_STATUS,
@@ -133,15 +157,18 @@ struct Bq4050Driver : Driver {
         for (size_t i = 0; i < sizeof(statusCommands) / sizeof(statusCommands[0]); ++i) {
             unsigned status = 0;
             if (!readManufacturerStatus(bus, d, statusCommands[i], status)) {
-                return "ERROR: BQ4050 manufacturer status read failed (" +
-                       std::string(statusNames[i]) + ")";
+                result.error = "BQ4050 manufacturer status read failed (" +
+                               std::string(statusNames[i]) + ")";
+                return false;
             }
             output << ", " << statusNames[i] << "=" << hex(status, 8);
+            result.add(statusNames[i], static_cast<uint64_t>(status), {}, static_cast<uint64_t>(status));
         }
 
         std::vector<BYTE> data;
         if (!readManufacturerData(bus, d, MAC_DA_STATUS_1, 32, data)) {
-            return "ERROR: BQ4050 DAStatus1 read failed";
+            result.error = "BQ4050 DAStatus1 read failed";
+            return false;
         }
         output << ", cell_voltage_mv=(" << readLittleEndianWord(data, 0)
                << "," << readLittleEndianWord(data, 2)
@@ -160,9 +187,15 @@ struct Bq4050Driver : Driver {
                << "," << static_cast<int16_t>(readLittleEndianWord(data, 26)) << ")"
                << ", power_cw=" << static_cast<int16_t>(readLittleEndianWord(data, 28))
                << ", average_power_cw=" << static_cast<int16_t>(readLittleEndianWord(data, 30));
+        result.add("cell1_voltage_mv", static_cast<uint64_t>(readLittleEndianWord(data, 0)), "mV");
+        result.add("cell2_voltage_mv", static_cast<uint64_t>(readLittleEndianWord(data, 2)), "mV");
+        result.add("cell3_voltage_mv", static_cast<uint64_t>(readLittleEndianWord(data, 4)), "mV");
+        result.add("cell4_voltage_mv", static_cast<uint64_t>(readLittleEndianWord(data, 6)), "mV");
+        result.add("pack_voltage_mv", static_cast<uint64_t>(readLittleEndianWord(data, 10)), "mV");
 
         if (!readManufacturerData(bus, d, MAC_DA_STATUS_2, 14, data)) {
-            return "ERROR: BQ4050 DAStatus2 read failed";
+            result.error = "BQ4050 DAStatus2 read failed";
+            return false;
         }
         output << ", internal_temperature_c="
                << deciKelvinToCelsius(readLittleEndianWord(data, 0))
@@ -178,7 +211,14 @@ struct Bq4050Driver : Driver {
                << deciKelvinToCelsius(readLittleEndianWord(data, 10))
                << ", fet_temperature_c="
                << deciKelvinToCelsius(readLittleEndianWord(data, 12));
-        return output.str();
+        result.add("internal_temperature_c", deciKelvinToCelsius(readLittleEndianWord(data, 0)), "C");
+        result.add("ts1_temperature_c", deciKelvinToCelsius(readLittleEndianWord(data, 2)), "C");
+        result.add("ts2_temperature_c", deciKelvinToCelsius(readLittleEndianWord(data, 4)), "C");
+        result.add("ts3_temperature_c", deciKelvinToCelsius(readLittleEndianWord(data, 6)), "C");
+        result.add("ts4_temperature_c", deciKelvinToCelsius(readLittleEndianWord(data, 8)), "C");
+        result.add("cell_temperature_c", deciKelvinToCelsius(readLittleEndianWord(data, 10)), "C");
+        result.add("fet_temperature_c", deciKelvinToCelsius(readLittleEndianWord(data, 12)), "C");
+        return true;
     }
 
     std::vector<DriverAction> actions() const override {

@@ -78,13 +78,15 @@ inline BYTE decToBcd(unsigned n) {
 }
 class Logger {
     std::string dir_;
+    std::string frontendTag_;
     std::string auditPath_;
     std::ofstream audit_;
     AppMutex auditMutex_;
 public:
-    explicit Logger(std::string dir) : dir_(std::move(dir)) {
+    explicit Logger(std::string dir, std::string frontendTag = "app")
+        : dir_(std::move(dir)), frontendTag_(std::move(frontendTag)) {
         CreateDirectoryA(dir_.c_str(), nullptr);
-        auditPath_ = dir_ + "\\audit_" + timestamp(true) + ".log";
+        auditPath_ = dir_ + "\\audit_" + frontendTag_ + "_" + timestamp(true) + ".log";
         audit_.open(auditPath_, std::ios::app);
     }
     bool available() const { return audit_.is_open(); }
@@ -97,7 +99,7 @@ public:
     std::unique_ptr<std::ofstream> openDeviceLog(const DeviceConfig& d) {
         std::string safe = d.name;
         for (char& c : safe) if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')) c = '_';
-        auto f = std::make_unique<std::ofstream>(dir_ + "\\" + safe + "_" + timestamp(true) + ".csv", std::ios::app);
+        auto f = std::make_unique<std::ofstream>(dir_ + "\\" + safe + "_" + frontendTag_ + "_" + timestamp(true) + ".csv", std::ios::app);
         if (*f) *f << "timestamp,device,type,address,stream\n";
         return f;
     }

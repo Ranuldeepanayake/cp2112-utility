@@ -7,10 +7,18 @@
 struct Ds3231Driver : Driver {
     std::string title() const override { return "DS3231 RTC"; }
     std::string capabilities() const override { return "Read clock/date and temperature; set RTC date/time; write control register"; }
+    std::vector<DriverRegister> registers() const override {
+        return {{0x00, "TIME", "Seconds through year clock/calendar block", true, true},
+                {0x0E, "CONTROL", "RTC control register", true, true},
+                {0x11, "TEMP", "Signed temperature measurement block", true, false}};
+    }
 
-    std::string readStream(Bus& bus, const DeviceConfig& d) override {
+    bool readResult(Bus& bus, const DeviceConfig& d, DeviceResult& result) override {
         std::vector<BYTE> time, temperature;
-        if (!bus.read(d.address, 0x00, 1, 7, time) || !bus.read(d.address, 0x11, 1, 2, temperature)) return "ERROR: I2C read failed";
+        if (!bus.read(d.address, 0x00, 1, 7, time) || !bus.read(d.address, 0x11, 1, 2, temperature)) {
+            result.error = "I2C read failed";
+            return false;
+        }
         const unsigned second = bcdToDec(time[0] & 0x7f), minute = bcdToDec(time[1] & 0x7f);
         const unsigned hour = (time[2] & 0x40) ?
             (bcdToDec(time[2] & 0x1f) % 12 + ((time[2] & 0x20) ? 12 : 0)) :
@@ -19,13 +27,15 @@ struct Ds3231Driver : Driver {
         const unsigned year = 2000 + bcdToDec(time[6]);
         const int whole = static_cast<int8_t>(temperature[0]);
         const double celsius = whole + ((temperature[1] >> 6) * 0.25);
-        std::ostringstream output;
-        output << "rtc=" << std::setfill('0') << std::setw(4) << year << "-"
-               << std::setw(2) << month << "-" << std::setw(2) << day << " "
-               << std::setw(2) << hour << ":" << std::setw(2) << minute << ":"
-               << std::setw(2) << second << ", temperature_c=" << std::fixed
-               << std::setprecision(2) << celsius;
-        return output.str();
+        std::ostringstream rtc;
+        rtc << std::setfill('0') << std::setw(4) << year << "-"
+            << std::setw(2) << month << "-" << std::setw(2) << day << " "
+            << std::setw(2) << hour << ":" << std::setw(2) << minute << ":"
+            << std::setw(2) << second;
+        result.succeeded = true;
+        result.add("rtc", rtc.str());
+        result.add("temperature_c", celsius, "C", static_cast<int64_t>(whole));
+        return true;
     }
 
     std::vector<DriverAction> actions() const override {

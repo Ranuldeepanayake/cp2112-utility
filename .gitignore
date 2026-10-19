@@ -6,3 +6,6 @@
 
 # Locally compiled Windows resource objects are build outputs too.
 *.o
+
+# Keep all local intermediate build files out of the repository.
+/build/
