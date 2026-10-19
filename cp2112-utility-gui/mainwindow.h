@@ -32,6 +32,9 @@ private slots:
     void selectDeviceRow(int row, int column);
     void selectScannedDeviceRow(int row, int column);
     void refreshAdapterInformation();
+    void testGpioIndicators();
+    void toggleGpioActivity(bool enabled);
+    void toggleGpioErrorPattern(bool enabled);
     void showDriverInformation();
     void executeDeviceAction();
     void editSelectedDeviceSettings();
@@ -116,6 +119,8 @@ private:
     QLineEdit* registerOutput_ = nullptr;
     QPushButton* clearResultsButton_ = nullptr;
     QPushButton* chartButton_ = nullptr;
+    QCheckBox* gpioActivity_ = nullptr;
+    QCheckBox* gpioErrorPattern_ = nullptr;
 
     QLineEdit* generalBridgeDll_ = nullptr;
     QLineEdit* generalLogDir_ = nullptr;

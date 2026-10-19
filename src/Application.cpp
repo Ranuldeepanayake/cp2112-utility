@@ -29,6 +29,35 @@ std::string driverAuditContext(const DeviceConfig& device, const Driver& driver)
            " driver=\"" + driver.title() + "\"";
 }
 
+// Converts the CP2112's compact transfer status into an audit-friendly cause.
+std::string transferErrorDescription(const TransferDiagnostics& diagnostics) {
+    std::string cause;
+    if (diagnostics.timedOut || diagnostics.apiStatus == 0x12 || diagnostics.apiStatus == 0x13)
+        cause = "timed_out";
+    else if (diagnostics.detailedStatus == 0x00)
+        cause = "address_nack_or_timeout";
+    else if (diagnostics.detailedStatus == 0x01)
+        cause = "bus_not_free_or_scl_low_timeout";
+    else if (diagnostics.detailedStatus == 0x02)
+        cause = "arbitration_lost_collision";
+    else if (diagnostics.detailedStatus == 0x03)
+        cause = "read_incomplete_frame_or_drop";
+    else if (diagnostics.detailedStatus == 0x04)
+        cause = "write_incomplete_frame_or_drop";
+    else if (diagnostics.detailedStatus == 0x05)
+        cause = "success_after_retry";
+    else if (diagnostics.cancelled)
+        cause = "cancelled";
+    else
+        cause = "transfer_error";
+    return cause + " api_status=" + std::to_string(diagnostics.apiStatus) +
+           " state=" + std::to_string(diagnostics.transferState) +
+           " detail=" + std::to_string(diagnostics.detailedStatus) +
+           " retries=" + std::to_string(diagnostics.retries) +
+           " bytes=" + std::to_string(diagnostics.bytesTransferred) +
+           " cancelled=" + (diagnostics.cancelled ? "true" : "false");
+}
+
 // Parses decimal or hexadecimal unsigned configuration values.
 bool parseUnsigned(const std::string& text, unsigned long& value) {
     try {
@@ -98,6 +127,7 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
         if (!current) {
             if (key == "bridge_dll") config.bridgeDll = value;
             else if (key == "log_dir") config.logDir = value;
+            else if (key == "version" && !value.empty()) config.version = value;
             else if (key == "build_timestamp" && !value.empty()) config.buildTimestamp = value;
             else if (key == "build_number" && !value.empty()) config.buildNumber = value;
             else if (key == "beta" && parseBool(value, boolean)) config.betaBuild = boolean;
@@ -123,6 +153,12 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
                 config.transferRetries = static_cast<unsigned>(number);
             else if (key == "log_retention_days" && parseUnsigned(value, number) && number <= 36500)
                 config.logRetentionDays = static_cast<unsigned>(number);
+            else if (key == "gpio_activity_enabled" && parseBool(value, boolean))
+                config.gpioActivityEnabled = boolean;
+            else if (key == "gpio_error_pattern_enabled" && parseBool(value, boolean))
+                config.gpioErrorPatternEnabled = boolean;
+            else if (key == "gpio_error_pin" && parseUnsigned(value, number) && number >= 2 && number <= 6)
+                config.gpioErrorPin = static_cast<unsigned>(number);
             else {
                 error = "Invalid general setting at line " + std::to_string(lineNumber) + ": " + key;
                 return false;
@@ -620,6 +656,12 @@ bool ApplicationService::updateGeneralSetting(const std::string& key, const Sett
         serialized = std::to_string(number); config_.transferRetries = static_cast<unsigned>(number);
     } else if (normalized == "log_retention_days" && settingUnsigned(value, number) && number <= 36500) {
         serialized = std::to_string(number); config_.logRetentionDays = static_cast<unsigned>(number);
+    } else if (normalized == "gpio_activity_enabled" && settingBoolean(value, boolean)) {
+        serialized = boolean ? "true" : "false"; config_.gpioActivityEnabled = boolean;
+    } else if (normalized == "gpio_error_pattern_enabled" && settingBoolean(value, boolean)) {
+        serialized = boolean ? "true" : "false"; config_.gpioErrorPatternEnabled = boolean;
+    } else if (normalized == "gpio_error_pin" && settingUnsigned(value, number) && number >= 2 && number <= 6) {
+        serialized = std::to_string(number); config_.gpioErrorPin = static_cast<unsigned>(number);
     } else {
         error = "Invalid or read-only general setting: " + key;
         return false;
@@ -754,6 +796,137 @@ bool ApplicationService::openDevice(const DeviceConfig& config, Device& handle,
                 "; status=" + std::to_string(status);
         return false;
     }
+    if (!configureGpio(handle, config_.gpioActivityEnabled, config_.gpioErrorPatternEnabled,
+                       error)) {
+        api_.close(handle);
+        handle = nullptr;
+        return false;
+    }
+    return true;
+}
+
+// Applies the reusable indicator policy. GPIO0/1 use CP2112 hardware TX/RX
+// toggle functions; the selected error pin is a normal push-pull GPIO so a
+// future frontend or board-specific mapping can reuse the same service.
+bool ApplicationService::configureGpio(Device handle, bool activity, bool errorOutput,
+                                       std::string& error) {
+    if (!handle || !api_.setGpioConfig) { error = "GPIO API is unavailable"; return false; }
+    // Keep GPIO0/1 explicitly configured as push-pull outputs as well as
+    // selecting their special functions. This matches the CP2112 evaluation
+    // board LED wiring and preserves strong TX/RX activity indication.
+    BYTE direction = activity ? 0x03 : 0;
+    BYTE mode = activity ? 0x03 : 0;
+    BYTE function = activity ? 0x06 : 0x00;
+    if (errorOutput && config_.gpioErrorPin <= 7) {
+        const BYTE errorMask = static_cast<BYTE>(1u << config_.gpioErrorPin);
+        direction = static_cast<BYTE>(direction | errorMask);
+        mode = static_cast<BYTE>(mode | errorMask);
+    }
+    if (api_.setGpioConfig(handle, direction, mode, function, 0) != 0) {
+        error = "Could not configure CP2112 GPIO indicators";
+        return false;
+    }
+    return true;
+}
+
+bool ApplicationService::gpioState(GpioIndicatorState& state, std::string& error) {
+    error.clear();
+    AppLockGuard lock(hardwareMutex_);
+    if (!initialized_ || config_.scanAdapterIndex >= adapterCount_) { error = "No CP2112 adapter is available"; return false; }
+    DeviceHandle handle(api_);
+    if (api_.open(handle.address(), config_.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID) != 0) {
+        error = "Could not open CP2112 adapter"; return false;
+    }
+    if (api_.getGpioConfig(handle.get(), &state.direction, &state.mode, &state.function,
+                           &state.clockDivider) != 0 || api_.readLatch(handle.get(), &state.latch) != 0) {
+        error = "Could not read CP2112 GPIO state"; return false;
+    }
+    return true;
+}
+
+bool ApplicationService::setGpioActivityIndicators(bool enabled, std::string& error) {
+    if (!updateGeneralSetting("gpio_activity_enabled", enabled, error)) return false;
+    AppLockGuard lock(hardwareMutex_);
+    DeviceHandle handle(api_);
+    if (config_.scanAdapterIndex >= adapterCount_ || api_.open(handle.address(), config_.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID) != 0) {
+        error = "Could not open CP2112 adapter"; return false;
+    }
+    const bool ok = configureGpio(handle.get(), enabled, config_.gpioErrorPatternEnabled, error);
+    if (logger_) logger_->audit("GPIO action=activity_indicators enabled=" + std::string(enabled ? "true" : "false") +
+                                " succeeded=" + (ok ? "true" : "false") + (error.empty() ? "" : " error=\"" + error + "\""));
+    return ok;
+}
+
+bool ApplicationService::setGpioErrorPattern(bool enabled, std::string& error) {
+    if (!updateGeneralSetting("gpio_error_pattern_enabled", enabled, error)) return false;
+    AppLockGuard lock(hardwareMutex_);
+    DeviceHandle handle(api_);
+    if (config_.scanAdapterIndex >= adapterCount_ || api_.open(handle.address(), config_.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID) != 0) {
+        error = "Could not open CP2112 adapter"; return false;
+    }
+    const bool ok = configureGpio(handle.get(), config_.gpioActivityEnabled, enabled, error);
+    if (logger_) logger_->audit("GPIO action=error_pattern enabled=" + std::string(enabled ? "true" : "false") +
+                                " pin=" + std::to_string(config_.gpioErrorPin) +
+                                " succeeded=" + (ok ? "true" : "false") + (error.empty() ? "" : " error=\"" + error + "\""));
+    return ok;
+}
+
+bool ApplicationService::testGpioIndicators(std::string& error) {
+    error.clear();
+    AppLockGuard lock(hardwareMutex_);
+    DeviceHandle handle(api_);
+    if (config_.scanAdapterIndex >= adapterCount_ || api_.open(handle.address(), config_.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID) != 0) {
+        error = "Could not open CP2112 adapter"; return false;
+    }
+    const BYTE mask = 0x03;
+    if (api_.setGpioConfig(handle.get(), mask, mask, 0, 0) != 0) { error = "Could not configure test GPIOs"; if (logger_) logger_->audit("GPIO action=test_leds succeeded=false error=\"" + error + "\""); return false; }
+    const BYTE testValues[] = {0x00, 0x01, 0x02, 0x03, 0x00};
+    for (BYTE value : testValues) {
+        if (api_.writeLatch(handle.get(), value, mask) != 0) { error = "Could not drive test GPIOs"; if (logger_) logger_->audit("GPIO action=test_leds succeeded=false error=\"" + error + "\""); return false; }
+        Sleep(150);
+    }
+    // The evaluation-board LEDs are normally wired to the CP2112 special
+    // functions, so also exercise the real TX/RX toggle path. A harmless
+    // one-byte read is attempted against the first configured target; a
+    // missing target is acceptable because the purpose is LED activity.
+    if (config_.gpioActivityEnabled) {
+        if (api_.setGpioConfig(handle.get(), 0, 0x00, 0x06, 0) != 0) {
+            error = "Could not enable TX/RX toggle functions for LED test";
+            if (logger_) logger_->audit("GPIO action=test_leds succeeded=false error=\"" + error + "\"");
+            return false;
+        }
+        unsigned testAddress = 0x7F;
+        for (const auto& device : config_.devices) {
+            if (device.enabled) { testAddress = device.address; break; }
+        }
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            if (api_.readRequest(handle.get(), static_cast<BYTE>(testAddress << 1), 1) == 0) {
+                BYTE response[61]{}, received = 0; int state = TRANSFER_IDLE;
+                api_.getReadResponse(handle.get(), &state, response, sizeof(response), &received);
+            }
+            Sleep(100);
+        }
+    }
+    const bool ok = configureGpio(handle.get(), config_.gpioActivityEnabled, config_.gpioErrorPatternEnabled, error);
+    if (logger_) logger_->audit("GPIO action=test_leds pins=GPIO0,GPIO1 succeeded=" + std::string(ok ? "true" : "false") +
+                                (error.empty() ? "" : " error=\"" + error + "\""));
+    return ok;
+}
+
+bool ApplicationService::signalGpioError(Device handle) {
+    if (!config_.gpioErrorPatternEnabled || !handle) return false;
+    const BYTE mask = static_cast<BYTE>(1u << config_.gpioErrorPin);
+    const BYTE activityMask = config_.gpioActivityEnabled ? 0x03 : 0;
+    if (api_.setGpioConfig(handle, static_cast<BYTE>(mask | activityMask),
+                           static_cast<BYTE>(mask | activityMask),
+                           config_.gpioActivityEnabled ? 0x06 : 0, 0) != 0) return false;
+    // Short Morse-like error indication: three flashes, pause, one flash.
+    for (int i = 0; i < 3; ++i) { api_.writeLatch(handle, mask, mask); Sleep(60); api_.writeLatch(handle, 0, mask); Sleep(60); }
+    Sleep(100);
+    api_.writeLatch(handle, mask, mask); Sleep(180); api_.writeLatch(handle, 0, mask);
+    std::string ignored;
+    configureGpio(handle, config_.gpioActivityEnabled, config_.gpioErrorPatternEnabled, ignored);
+    if (logger_) logger_->audit("GPIO action=error_pattern_flash pin=" + std::to_string(config_.gpioErrorPin) + " pattern=3-short-1-long");
     return true;
 }
 
@@ -786,6 +959,10 @@ bool ApplicationService::readDeviceResult(size_t deviceIndex, DeviceResult& resu
         return false;
     }
     const bool succeeded = driver->readResult(bus, device, result);
+    if (!succeeded) {
+        signalGpioError(handle.get());
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) + " i2c_error=" + transferErrorDescription(bus.lastDiagnostics()));
+    }
     if (logger_) logger_->audit(driverAuditContext(device, *driver) +
                                " operation=read succeeded=" + (succeeded ? "true" : "false") +
                                " result=\"" + formatDeviceResult(result) + "\"");
@@ -848,6 +1025,11 @@ bool ApplicationService::executeDeviceAction(size_t deviceIndex, const std::stri
         return false;
     }
     const bool succeeded = driver->executeAction(bus, device, action, parameters, result);
+    if (!succeeded) {
+        signalGpioError(handle.get());
+        if (logger_) logger_->audit(driverAuditContext(device, *driver) + " action=" + action +
+                                   " i2c_error=" + transferErrorDescription(bus.lastDiagnostics()));
+    }
     if (logger_) logger_->audit(driverAuditContext(device, *driver) +
                                " operation=action action=" + action +
                                " succeeded=" + (succeeded ? "true" : "false") +
@@ -890,6 +1072,8 @@ bool ApplicationService::readRegister(unsigned deviceAddress, unsigned registerA
         auditFailure(error); return false;
     }
     if (!bus.read(deviceAddress, registerAddress, 1, expectedBytes, values) || values.empty()) {
+        signalGpioError(handle.get());
+        if (logger_) logger_->audit("Direct register read i2c_error=" + transferErrorDescription(bus.lastDiagnostics()));
         error = "Read failed at device " + hex(deviceAddress) + ", register " + hex(registerAddress);
         auditFailure(error); return false;
     }
@@ -938,6 +1122,8 @@ bool ApplicationService::writeRegister(unsigned deviceAddress, unsigned register
         auditFailure(error); return false;
     }
     if (!bus.writeReg(deviceAddress, static_cast<BYTE>(registerAddress), value)) {
+        signalGpioError(handle.get());
+        if (logger_) logger_->audit("Direct register write i2c_error=" + transferErrorDescription(bus.lastDiagnostics()));
         error = "Write failed at device " + hex(deviceAddress) + ", register " + hex(registerAddress);
         auditFailure(error); return false;
     }
@@ -989,7 +1175,12 @@ bool ApplicationService::streamDeviceStructured(size_t deviceIndex, std::atomic<
                    (device.logStream ? "on" : "off"));
     while (!stop.load()) {
         DeviceResult value;
-        driver->readResult(bus, device, value);
+        const bool readSucceeded = driver->readResult(bus, device, value);
+        if (!readSucceeded) {
+            signalGpioError(handle.get());
+            if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                       " operation=stream i2c_error=" + transferErrorDescription(bus.lastDiagnostics()));
+        }
         const std::string timestampValue = timestamp();
         callback(timestampValue, value);
         const std::string displayValue = formatDeviceResult(value);

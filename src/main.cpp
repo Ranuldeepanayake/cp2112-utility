@@ -141,7 +141,7 @@ std::string defaultConfigPath() {
 
 // Formats the embedded CI metadata in the user-facing build label.
 std::string versionString(const AppConfig& config) {
-    std::string version = "Build " + config.buildTimestamp + "-" + config.buildNumber;
+    std::string version = "Build v" + config.version + "_" + config.buildTimestamp + "_" + config.buildNumber;
     if (config.betaBuild) version += "-beta";
     return version;
 }
@@ -563,6 +563,29 @@ void cleanLogs(ApplicationService& app) {
               << result.failed << "\n";
 }
 
+// Provides a frontend-independent proof of concept for CP2112 GPIO indicators.
+void gpioIndicatorMenu(ApplicationService& app) {
+    while (true) {
+        const AppConfig config = app.config();
+        std::cout << "\nGPIO indicators (GPIO0=TX toggle, GPIO1=RX toggle, GPIO"
+                  << config.gpioErrorPin << "=error pattern):\n"
+                  << "1 Activity LEDs: " << (config.gpioActivityEnabled ? "enabled" : "disabled") << "\n"
+                  << "2 Error pattern: " << (config.gpioErrorPatternEnabled ? "enabled" : "disabled") << "\n"
+                  << "3 Test LEDs\n0 Back\n> ";
+        unsigned choice = 0;
+        if (!promptUnsigned("", 0, choice) || choice == 0) return;
+        std::string error;
+        if (choice == 1) {
+            if (!app.setGpioActivityIndicators(!config.gpioActivityEnabled, error)) std::cout << error << "\n";
+        } else if (choice == 2) {
+            if (!app.setGpioErrorPattern(!config.gpioErrorPatternEnabled, error)) std::cout << error << "\n";
+        } else if (choice == 3) {
+            if (!app.testGpioIndicators(error)) std::cout << error << "\n";
+            else std::cout << "GPIO indicator test completed.\n";
+        } else std::cout << "Invalid choice.\n";
+    }
+}
+
 // Proof-of-concept frontend for the shared persisted settings API.
 void settingsMenu(ApplicationService& app) {
     discardInputLine();
@@ -666,7 +689,7 @@ int main(int argc, char** argv) {
         std::cout << "\n========== CP2112 Utility by ranuldeepanayake and AI " << versionString(app.config()) << " ==========\n"
                   << "1 List configured devices\n2 Select device\n3 Adapter information\n"
                   << "4 Reload configuration\n5 Scan I2C addresses\n"
-                  << "6 Direct register read/write\n7 Clean old logs\n8 Settings\n0 Exit\n> ";
+                  << "6 Direct register read/write\n7 Clean old logs\n8 Settings\n9 GPIO/LED indicators\n0 Exit\n> ";
         int choice;
         if (!(std::cin >> choice)) {
             std::cin.clear();
@@ -705,6 +728,8 @@ int main(int argc, char** argv) {
             cleanLogs(app);
         } else if (choice == 8) {
             settingsMenu(app);
+        } else if (choice == 9) {
+            gpioIndicatorMenu(app);
         } else {
             std::cout << "Invalid choice.\n";
         }
