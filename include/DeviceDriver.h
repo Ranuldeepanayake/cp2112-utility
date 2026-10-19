@@ -84,6 +84,9 @@ struct Driver {
         return formatDeviceResult(result);
     }
     virtual std::string capabilities() const = 0;
+    // Clears driver-side initialization state after a device disappears and
+    // is later reconnected during a long-running stream.
+    virtual void resetState() {}
     virtual std::vector<DriverAction> actions() const = 0;
     virtual std::vector<DriverRegister> registers() const { return {}; }
     virtual bool executeAction(Bus& bus, const DeviceConfig& d,

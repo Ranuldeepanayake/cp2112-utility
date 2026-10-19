@@ -1180,6 +1180,17 @@ bool ApplicationService::streamDeviceStructured(size_t deviceIndex, std::atomic<
             signalGpioError(handle.get());
             if (logger_) logger_->audit(driverAuditContext(device, *driver) +
                                        " operation=stream i2c_error=" + transferErrorDescription(bus.lastDiagnostics()));
+            // Reinitialize the transfer engine and driver state after a
+            // target disappears during a long-running stream.
+            const bool recovered = bus.recover();
+            driver->resetState();
+            std::string recoveryError;
+            const bool configured = configureGpio(handle.get(), config_.gpioActivityEnabled,
+                                                  config_.gpioErrorPatternEnabled, recoveryError);
+            const bool clocked = bus.setClock(device.clock);
+            if (logger_) logger_->audit(driverAuditContext(device, *driver) +
+                                        " operation=stream-recovery recovered=" +
+                                        (recovered && configured && clocked ? "true" : "false"));
         }
         const std::string timestampValue = timestamp();
         callback(timestampValue, value);

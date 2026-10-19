@@ -146,6 +146,7 @@ class Bus {
     Api& api_;
     Device handle_ = nullptr;
     DWORD timeoutMs_ = 500;
+    DWORD clockHz_ = 100000;
     WORD transferRetries_ = 0;
     std::atomic<bool>* cancelRequested_ = nullptr;
     TransferDiagnostics lastDiagnostics_{};
@@ -163,7 +164,16 @@ public:
         const WORD hardwareTimeout = static_cast<WORD>(std::min<DWORD>(timeoutMs_, 1000));
         // GetReadResponse has a separate default response timeout of 1000 ms;
         // set it explicitly or a missing device can still block for that default.
+        clockHz_ = hz;
         return api_.setConfig(handle_, hz, 0x02, TRUE, hardwareTimeout, hardwareTimeout,
+                              TRUE, transferRetries_) == 0 &&
+               api_.setTimeouts(handle_, hardwareTimeout) == 0;
+    }
+    // Recover the CP2112 transfer engine after a target disappears mid-stream.
+    bool recover() {
+        cancel();
+        const WORD hardwareTimeout = static_cast<WORD>(std::min<DWORD>(timeoutMs_, 1000));
+        return api_.setConfig(handle_, clockHz_, 0x02, TRUE, hardwareTimeout, hardwareTimeout,
                               TRUE, transferRetries_) == 0 &&
                api_.setTimeouts(handle_, hardwareTimeout) == 0;
     }

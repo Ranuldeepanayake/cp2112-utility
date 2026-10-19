@@ -13,6 +13,7 @@ struct Bmp280Driver : Driver {
 
     std::string title() const override { return "BMP280 pressure/temperature"; }
     std::string capabilities() const override { return "Read raw and compensated temperature/pressure; write control/config registers"; }
+    void resetState() override { configured_ = false; }
     std::vector<DriverRegister> registers() const override {
         return {{0xD0, "CHIP_ID", "BMP280 chip identification", true, false},
                 {0x88, "CALIBRATION", "Temperature and pressure calibration block", true, false},
