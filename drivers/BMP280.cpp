@@ -7,6 +7,10 @@
 #include <vector>
 
 struct Bmp280Driver : Driver {
+    // Keep configuration state for a live-polling session. Normal mode
+    // continuously refreshes the output registers after this one-time setup.
+    bool configured_ = false;
+
     std::string title() const override { return "BMP280 pressure/temperature"; }
     std::string capabilities() const override { return "Read raw and compensated temperature/pressure; write control/config registers"; }
     std::vector<DriverRegister> registers() const override {
@@ -18,10 +22,9 @@ struct Bmp280Driver : Driver {
     }
 
     bool readResult(Bus& bus, const DeviceConfig& d, DeviceResult& result) override {
-        std::vector<BYTE> id, calibration, control, status, raw;
+        std::vector<BYTE> id, calibration, status, raw;
         if (!bus.read(d.address, 0xD0, 1, 1, id) ||
-            !bus.read(d.address, 0x88, 1, 24, calibration) ||
-            !bus.read(d.address, 0xF4, 1, 1, control)) {
+            !bus.read(d.address, 0x88, 1, 24, calibration)) {
             result.error = "I2C read failed";
             return false;
         }
@@ -31,18 +34,20 @@ struct Bmp280Driver : Driver {
             return false;
         }
 
-        // Request a fresh forced-mode conversion for every read. This is
-        // important when the device was left in sleep mode: register 0xF7
-        // otherwise contains the previous conversion indefinitely.
-        BYTE measurementControl = control[0];
-        // A zero oversampling field disables that measurement. Use x1 as a
-        // safe default so both pressure and temperature are refreshed.
-        if ((measurementControl & 0xE0) == 0) measurementControl |= 0x20;
-        if ((measurementControl & 0x1C) == 0) measurementControl |= 0x04;
-        measurementControl = static_cast<BYTE>((measurementControl & 0xFC) | 0x01);
-        if (!bus.writeReg(d.address, 0xF4, measurementControl)) {
-            result.error = "could not start BMP280 forced conversion";
-            return false;
+        // Configure the sensor once per driver session, following the
+        // reference AVR implementation: x16 pressure, x2 temperature, and
+        // normal mode. Normal mode continuously cycles measurements, so live
+        // polling can read fresh output without restarting each conversion.
+        if (!configured_) {
+            if (!bus.writeReg(d.address, 0xF4, 0x00) ||
+                !bus.writeReg(d.address, 0xF5, 0x00) ||
+                !bus.writeReg(d.address, 0xF4, 0x57)) {
+                result.error = "could not initialize BMP280 normal mode";
+                return false;
+            }
+            configured_ = true;
+            // Allow the first normal-mode conversion to complete.
+            Sleep(45);
         }
 
         // Wait until the BMP280 clears the measuring bit in STATUS (0xF3).
@@ -53,7 +58,7 @@ struct Bmp280Driver : Driver {
                 result.error = "could not read BMP280 conversion status";
                 return false;
             }
-            if ((status[0] & 0x08) == 0) {
+            if ((status[0] & 0x09) == 0) {
                 ready = true;
                 break;
             }
