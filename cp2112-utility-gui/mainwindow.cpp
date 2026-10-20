@@ -383,8 +383,19 @@ void MainWindow::buildUi() {
     auto* adapterLayout = new QVBoxLayout(adapters);
     auto* refreshAdapterButton = new QPushButton("Query adapter information", adapters);
     refreshAdapterButton->setMaximumWidth(220);
+    auto* gpioBox = new QGroupBox("GPIO indicators", adapters);
+    auto* gpioLayout = new QHBoxLayout(gpioBox);
+    gpioActivity_ = new QCheckBox("TX/RX activity LEDs", gpioBox);
+    gpioErrorPattern_ = new QCheckBox("I2C error pattern", gpioBox);
+    gpioActivity_->setChecked(app_.config().gpioActivityEnabled);
+    gpioErrorPattern_->setChecked(app_.config().gpioErrorPatternEnabled);
+    auto* testGpioButton = new QPushButton("Test LEDs", gpioBox);
+    testGpioButton->setMaximumWidth(110);
+    gpioLayout->addWidget(gpioActivity_); gpioLayout->addWidget(gpioErrorPattern_);
+    gpioLayout->addWidget(testGpioButton); gpioLayout->addStretch();
     adapterTable_ = makeTable({"Property", "Value"}, adapters);
     adapterLayout->addWidget(refreshAdapterButton);
+    adapterLayout->addWidget(gpioBox);
     adapterLayout->addWidget(adapterTable_, 1);
     tabs->addTab(adapters, "Adapter information");
 
@@ -566,6 +577,9 @@ void MainWindow::buildUi() {
     connect(writeRegisterButton, &QPushButton::clicked, this, &MainWindow::writeRegister);
     connect(saveGeneral, &QPushButton::clicked, this, &MainWindow::saveGeneralSettings);
     connect(refreshAdapterButton, &QPushButton::clicked, this, &MainWindow::refreshAdapterInformation);
+    connect(testGpioButton, &QPushButton::clicked, this, &MainWindow::testGpioIndicators);
+    connect(gpioActivity_, &QCheckBox::toggled, this, &MainWindow::toggleGpioActivity);
+    connect(gpioErrorPattern_, &QCheckBox::toggled, this, &MainWindow::toggleGpioErrorPattern);
     connect(reloadConfigurationButton, &QPushButton::clicked, this, &MainWindow::reloadConfiguration);
     connect(cleanLogsButton, &QPushButton::clicked, this, &MainWindow::cleanLogs);
     connect(clearAllLogsButton, &QPushButton::clicked, this, &MainWindow::clearAllLogs);
@@ -649,7 +663,10 @@ void MainWindow::loadConfiguration() {
         return;
     }
     const AppConfig config = app_.config();
-    versionLabel_->setText(QString("Build %1%2").arg(QString::fromStdString(config.buildTimestamp + "-" + config.buildNumber))
+    versionLabel_->setText(QString("Build v%1_%2_%3%4")
+                           .arg(QString::fromStdString(config.version))
+                           .arg(QString::fromStdString(config.buildTimestamp))
+                           .arg(QString::fromStdString(config.buildNumber))
                            .arg(config.betaBuild ? " beta" : ""));
     generalBridgeDll_->setText(QString::fromStdString(config.bridgeDll));
     generalLogDir_->setText(QString::fromStdString(config.logDir));
@@ -662,6 +679,8 @@ void MainWindow::loadConfiguration() {
     generalRefresh_->setValue(config.defaultRefreshSeconds);
     generalRetention_->setValue(config.logRetentionDays);
     generalLogStream_->setChecked(config.defaultLogStream);
+    { const QSignalBlocker block(gpioActivity_); gpioActivity_->setChecked(config.gpioActivityEnabled); }
+    { const QSignalBlocker block(gpioErrorPattern_); gpioErrorPattern_->setChecked(config.gpioErrorPatternEnabled); }
     const QString configuredTheme = QString::fromStdString(config.theme.empty() ? (config.darkMode ? "dark" : "default") : config.theme);
     generalTheme_->setCurrentIndex(std::max(0, generalTheme_->findData(configuredTheme)));
     applyTheme(configuredTheme);
@@ -781,6 +800,45 @@ void MainWindow::refreshAdapterInformation() {
         }
     }
     showMessage(QString("Adapter information refreshed: %1 adapter(s).").arg(adapters.size()));
+}
+
+// Runs the shared CP2112 GPIO indicator test without putting GPIO policy in Qt.
+void MainWindow::testGpioIndicators() {
+    if (streamRunning_ || scanRunning_) {
+        showMessage("Stop live polling or the active scan before testing LEDs.");
+        return;
+    }
+    std::string error;
+    if (!app_.testGpioIndicators(error)) showError(QString::fromStdString(error));
+    else showMessage("GPIO indicator test completed: GPIO0 and GPIO1 were tested and restored.");
+}
+
+// Persists and applies the TX/RX hardware-toggle indicator policy.
+void MainWindow::toggleGpioActivity(bool enabled) {
+    if (streamRunning_ || scanRunning_) {
+        showMessage("Stop live polling or the active scan before changing GPIO activity indicators.");
+        gpioActivity_->blockSignals(true); gpioActivity_->setChecked(!enabled); gpioActivity_->blockSignals(false);
+        return;
+    }
+    std::string error;
+    if (!app_.setGpioActivityIndicators(enabled, error)) {
+        showError(QString::fromStdString(error));
+        gpioActivity_->blockSignals(true); gpioActivity_->setChecked(!enabled); gpioActivity_->blockSignals(false);
+    } else showMessage(QString("TX/RX activity indicators %1.").arg(enabled ? "enabled" : "disabled"));
+}
+
+// Persists and applies the software error-pattern indicator policy.
+void MainWindow::toggleGpioErrorPattern(bool enabled) {
+    if (streamRunning_ || scanRunning_) {
+        showMessage("Stop live polling or the active scan before changing the I2C error pattern.");
+        gpioErrorPattern_->blockSignals(true); gpioErrorPattern_->setChecked(!enabled); gpioErrorPattern_->blockSignals(false);
+        return;
+    }
+    std::string error;
+    if (!app_.setGpioErrorPattern(enabled, error)) {
+        showError(QString::fromStdString(error));
+        gpioErrorPattern_->blockSignals(true); gpioErrorPattern_->setChecked(!enabled); gpioErrorPattern_->blockSignals(false);
+    } else showMessage(QString("I2C error pattern %1.").arg(enabled ? "enabled" : "disabled"));
 }
 
 void MainWindow::showDriverInformation() {

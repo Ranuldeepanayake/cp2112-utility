@@ -16,6 +16,7 @@ using SettingValue = std::variant<uint64_t, bool, std::string>;
 struct AppConfig {
     std::string bridgeDll = "SLABHIDtoSMBus.dll";
     std::string logDir = "logs";
+    std::string version = "1.0.0";
     std::string buildTimestamp = "000000000000";
     std::string buildNumber = "0";
     bool betaBuild = false;
@@ -30,6 +31,11 @@ struct AppConfig {
     unsigned transferTimeoutMs = 500;
     unsigned transferRetries = 0;
     unsigned logRetentionDays = 30;
+    // CP2112 GPIO indicators are enabled by default. GPIO2 is a generic
+    // software-controlled error indicator, leaving GPIO0/1 for TX/RX toggle.
+    bool gpioActivityEnabled = true;
+    bool gpioErrorPatternEnabled = true;
+    unsigned gpioErrorPin = 2;
     std::vector<DeviceConfig> devices;
 };
 
@@ -107,6 +113,14 @@ struct LogCleanupResult {
     size_t failed = 0;
 };
 
+struct GpioIndicatorState {
+    BYTE direction = 0;
+    BYTE mode = 0;
+    BYTE function = 0;
+    BYTE clockDivider = 0;
+    BYTE latch = 0;
+};
+
 class ApplicationService {
 public:
     using StreamCallback = std::function<void(const std::string&, const std::string&)>;
@@ -157,6 +171,10 @@ public:
                              bool logStream, std::string& error);
     bool cleanLogs(unsigned days, LogCleanupResult& result, std::string& error);
     bool clearAllLogs(LogCleanupResult& result, std::string& error);
+    bool setGpioActivityIndicators(bool enabled, std::string& error);
+    bool setGpioErrorPattern(bool enabled, std::string& error);
+    bool testGpioIndicators(std::string& error);
+    bool gpioState(GpioIndicatorState& state, std::string& error);
 
 private:
     bool getDevice(size_t deviceIndex, DeviceConfig& device,
@@ -165,6 +183,9 @@ private:
                     std::string& error);
     bool persistSetting(const std::string& section, const std::string& key,
                         const std::string& value, std::string& error) const;
+    bool configureGpio(Device handle, bool activity, bool errorOutput,
+                       std::string& error);
+    bool signalGpioError(Device handle);
 
     std::string configPath_;
     AppConfig config_;

@@ -260,7 +260,7 @@ cmake --build build\release --parallel
 
 Run the GUI from the project root or a release package root so it can locate `config\devices.ini`, `logs\`, and the CP2112 DLLs. The GUI searches the current directory, its executable directory, and the nearby project-parent directories for the configuration file. The GUI uses the Qt runtime files in `bin\gui`; the CLI uses the separate MinGW runtime files in `bin\cli`.
 
-The GUI provides a dedicated re-queryable adapter-information page, click-to-select configured devices, structured timestamped readings, driver information and actions, live polling with cancellation and follow-latest scrolling, address scanning with live scanned/responded counts and optional non-responding rows (the completed scan can be re-filtered without rescanning), direct hexadecimal register reads and writes with visible status, a separate selected-device settings dialog, persisted general settings, configuration reload under Settings, retention cleanup and a confirmed clear-all-logs action, light/dark theme selection, and separate multi-instance line charts for numeric processed or raw readings. Build metadata is shown in the bottom status area.
+The GUI provides a dedicated re-queryable adapter-information page, click-to-select configured devices, structured timestamped readings, driver information and actions, live polling with cancellation and follow-latest scrolling, address scanning with live scanned/responded counts and optional non-responding rows (the completed scan can be re-filtered without rescanning), direct hexadecimal register reads and writes with visible status, a separate selected-device settings dialog, persisted general settings, configuration reload under Settings, retention cleanup and a confirmed clear-all-logs action, light/dark theme selection, separate multi-instance line charts for numeric processed or raw readings, and GPIO activity/error controls with a guarded LED test. Build metadata, including the configured semantic version, is shown in the header/footer status areas.
 
 When the GUI is built on Windows, its CMake configuration copies the GUI executable and Qt's matching runtime files into `bin\gui`. This includes `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, Qt's MinGW runtime DLLs, and `platforms\qwindows.dll`. The GUI executable is ignored by Git, while the runtime DLLs are intentionally trackable dependencies.
 
@@ -294,7 +294,7 @@ The workflow is stored in `.github/workflows/build-release.yml`. It runs for:
 - A merged `develop` to `main` pull request (`github.event.pull_request.merged == true`): creates a production build.
 - A manual dispatch from `develop`: creates a beta build.
 
-The workflow checks for an available 64-bit MinGW-w64 compiler, installs Qt 6.12 and its matching MinGW 13.1 toolchain through `install-qt-action` using the current `aqtinstall` source needed for Qt 6.12's repository metadata, and caches the complete Qt/toolchain installation with a project/version/architecture-specific cache key. The CLI is explicitly compiled and runtime-bundled from the separately pinned WinLibs archive; Qt's compiler and DLLs cannot replace the CLI runtime. It dynamically builds the CLI into `bin/cli`, builds the Qt GUI into `bin/gui`, verifies that the executables and Silicon Labs DLLs are 64-bit, bundles only missing runtime DLLs into the matching subdirectory, and packages both `bin/` and `config/`. Existing tracked Qt, MinGW, and Silicon Labs DLLs are preserved; runner copies are used only when a required file is absent. The ZIP/release name is `cp2112_utility-ddmmyyyyhhmm-buildnumber-beta.zip` for beta builds or `cp2112_utility-ddmmyyyyhhmm-buildnumber.zip` for merged releases. Opening a `develop` to `main` pull request creates a beta package; closing it as merged (`github.event.pull_request.merged == true`) creates the release package without a state suffix. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
+The workflow checks for an available 64-bit MinGW-w64 compiler, installs Qt 6.12 and its matching MinGW 13.1 toolchain through `install-qt-action` using the current `aqtinstall` source needed for Qt 6.12's repository metadata, and caches the complete Qt/toolchain installation with a project/version/architecture-specific cache key. The CLI is explicitly compiled and runtime-bundled from the separately pinned WinLibs archive; Qt's compiler and DLLs cannot replace the CLI runtime. It dynamically builds the CLI into `bin/cli`, builds the Qt GUI into `bin/gui`, verifies that the executables and Silicon Labs DLLs are 64-bit, bundles only missing runtime DLLs into the matching subdirectory, and packages both `bin/` and `config/`. Existing tracked Qt, MinGW, and Silicon Labs DLLs are preserved; runner copies are used only when a required file is absent. If `version=1.1.0`, the ZIP/release/tag name is `cp2112_utility-v1.1.0_ddmmyyyyhhmm_buildnumber.zip` for merged releases or `cp2112_utility-v1.1.0_ddmmyyyyhhmm_buildnumber-beta.zip` for beta builds. Opening a `develop` to `main` pull request creates a beta package; closing it as merged (`github.event.pull_request.merged == true`) creates the release package without a state suffix. The package is uploaded as a workflow artifact and attached to a GitHub Release. A matching tag is created only after compilation and runtime bundling succeed.
 
 After compilation succeeds, CI updates `build_timestamp` (`ddMMyyyyHHmm`), `build_number`, and `beta` in `config\devices.ini`, commits those values back to the source branch, and uses that commit for the release tag. If compilation fails, no metadata commit or release tag is created. The workflow must be present on `main` before merged pull request events can trigger production runs.
 
@@ -310,6 +310,7 @@ The main menu provides these options:
 6. **Direct register read/write** — send a read or write command to a selected I²C device and register address. Register Access supports an expected read length of 1–512 bytes; the default is one byte. Returned bytes are shown as a copyable hexadecimal stream. The expected length is required for bounded SMBus transfers so the CP2112 can complete the read correctly. Writes remain one byte at a time.
 7. **Clean old logs** — interactively delete application logs older than a specified number of days.
 8. **Settings** — update validated general and device-specific settings and persist them to `config/devices.ini`.
+9. **GPIO/LED indicators** — enable or disable TX/RX activity indication, enable or disable the I²C error flash pattern, and run a GPIO LED test.
 0. **Exit** — close the application.
 
 In a device menu:
@@ -323,6 +324,13 @@ In a device menu:
 
 The frontend-neutral settings API persists validated general and device settings back to `devices.ini` while preserving unrelated comments and sections. The CLI exposes this through **Settings** as a proof of concept. Select **Reload configuration** after external edits; changes to `bridge_dll` and `log_dir` still require restarting.
 
+### CP2112 GPIO indicators
+
+The error pattern uses only the configured software GPIO (GPIO2 by default), not GPIO0/1. GPIO0 and GPIO1 remain reserved for TX/RX activity. When activity is enabled, the core configures GPIO0/1 as explicit push-pull outputs and enables the CP2112 TX-toggle/RX-toggle special functions. The LED test temporarily switches GPIO0/1 to ordinary outputs, tests them individually and together, exercises real TX/RX transfers, then restores the TX/RX activity configuration. It should not be run while live polling or address scanning is active; the GUI prevents that overlap.
+
+The shared application service configures GPIO0 as the CP2112 TX-toggle output and GPIO1 as the RX-toggle output when activity indication is enabled. The Silicon Labs CP2112 evaluation hardware can connect those special-function outputs to its activity LEDs. I²C transfer failures from driver-backed and direct register operations use a short three-flash/long-flash pattern on `gpio_error_pin`; GPIO2 is intentionally the default so the error indicator is independently expandable to another pin or board-specific LED. Audit entries include GPIO action names, enabled state, selected error pin, pattern, and success/failure. Transfer failures include CP2112 API status, transfer state/detail, retry count, byte count, timeout, and cancellation information. The CLI's **GPIO/LED indicators** menu and the GUI's **Adapter information** page use this same core service. The pattern requires an LED or other visible load connected to the selected GPIO; it cannot make an unconnected CP2112 pin visibly blink.
+If a device is disconnected during live polling, the shared service cancels and reapplies the CP2112 SMBus transfer configuration, restores GPIO indicators, and resets driver-side initialization state before the next poll. This allows drivers such as BMP280 to reconfigure a device after it is reconnected without restarting the application. The recovery attempt and its result are written to the audit log.
+
 ## Configuration reference
 
 The default configuration is `config/devices.ini`. It uses an INI-like format with a `[general]` section and one `[device NAME]` section per configured device.
@@ -333,6 +341,7 @@ Example:
 [general]
 bridge_dll=bin\SLABHIDtoSMBus.dll
 log_dir=logs
+version=1.1.0
 default_refresh_seconds=2
 default_log_stream=true
 scan_adapter_index=0
@@ -342,6 +351,9 @@ scan_clock_hz=100000
 transfer_timeout_ms=500
 transfer_retries=0
 log_retention_days=30
+gpio_activity_enabled=true
+gpio_error_pattern_enabled=true
+gpio_error_pin=2
 
 [device BMP280-1]
 type=bmp280
@@ -404,8 +416,9 @@ enabled=false
 |---|---|---|
 | `bridge_dll` | Path to Silicon Labs HID-to-SMBus DLL | Default: `bin\SLABHIDtoSMBus.dll` |
 | `log_dir` | Directory for audit and stream logs | Default: `logs`, resolved to the package root two levels above `bin\cli` or `bin\gui` |
+| `version` | Developer-controlled semantic application version used in CLI build information and CI release names | `major.minor.patch`, e.g. `1.1.0` |
 | `build_timestamp` | Build timestamp (`ddMMyyyyHHmm`) embedded in the CLI build label and release package name | Default: `000000000000`; updated only in CI packages |
-| `build_number` | CI pipeline run number embedded in the CLI build label | Default: `0`; unchanged by local builds |
+| `build_number` | CI pipeline run number embedded in the CLI build label and release package name, separated from the timestamp by `_` | Default: `0`; unchanged by local builds |
 | `beta` | Whether the package is a beta build | Default: `false`; updated only in CI packages |
 | `dark_mode` | GUI theme persisted in the configuration file | `true` or `false`; default `false` |
 | `theme` | GUI theme selection | `default`, `light`, or `dark`; default `default` |
@@ -418,6 +431,9 @@ enabled=false
 | `transfer_timeout_ms` | Default maximum time allowed for each CP2112 transfer/probe; can be overridden at the scan prompt. The value is limited by the CP2112 hardware maximum. | 1–1000 ms; default `500` |
 | `transfer_retries` | Default number of CP2112 hardware retries for each transfer; can be overridden at the scan prompt | 0–1000; default `0` |
 | `log_retention_days` | Automatically delete timestamped application log files at startup when their last-modified time is at least this many days old; oldest files are deleted first. `0` disables automatic cleanup. | 0–36500; default `30` |
+| `gpio_activity_enabled` | Enables CP2112 GPIO0 TX-toggle and GPIO1 RX-toggle activity indicators | `true` or `false`; default `true` |
+| `gpio_error_pattern_enabled` | Enables the short error flash pattern on the configured software GPIO | `true` or `false`; default `true` |
+| `gpio_error_pin` | GPIO pin used for the software-controlled I²C error pattern; GPIO2 is the default expansion pin. GPIO0/1 are reserved for TX/RX activity and GPIO7 may be reserved for clock output. | `2`–`6`; default `2` |
 
 ### Device settings
 

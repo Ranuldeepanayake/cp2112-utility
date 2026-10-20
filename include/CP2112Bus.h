@@ -35,6 +35,10 @@ using GetUsbConfigFn = Status (WINAPI*)(Device, WORD*, WORD*, BYTE*, BYTE*, WORD
 using GetSmbusConfigFn = Status (WINAPI*)(Device, DWORD*, BYTE*, BOOL*, WORD*, WORD*, BOOL*, WORD*);
 using GetLibraryVersionFn = Status (WINAPI*)(BYTE*, BYTE*, BOOL*);
 using GetHidLibraryVersionFn = Status (WINAPI*)(BYTE*, BYTE*, BOOL*);
+using SetGpioConfigFn = Status (WINAPI*)(Device, BYTE, BYTE, BYTE, BYTE);
+using GetGpioConfigFn = Status (WINAPI*)(Device, BYTE*, BYTE*, BYTE*, BYTE*);
+using ReadLatchFn = Status (WINAPI*)(Device, BYTE*);
+using WriteLatchFn = Status (WINAPI*)(Device, BYTE, BYTE);
 
 constexpr int TRANSFER_IDLE = 0;
 constexpr int TRANSFER_BUSY = 1;
@@ -77,6 +81,10 @@ struct Api {
     GetSmbusConfigFn getSmbusConfig = nullptr;
     GetLibraryVersionFn getLibraryVersion = nullptr;
     GetHidLibraryVersionFn getHidLibraryVersion = nullptr;
+    SetGpioConfigFn setGpioConfig = nullptr;
+    GetGpioConfigFn getGpioConfig = nullptr;
+    ReadLatchFn readLatch = nullptr;
+    WriteLatchFn writeLatch = nullptr;
 
     template<class T> bool load(T& fn, const char* name, std::string& error) {
         // GetProcAddress exposes a generic FARPROC. Windows guarantees that
@@ -125,7 +133,11 @@ struct Api {
                load(getUsbConfig, "HidSmbus_GetUsbConfig", error) &&
                load(getSmbusConfig, "HidSmbus_GetSmbusConfig", error) &&
                load(getLibraryVersion, "HidSmbus_GetLibraryVersion", error) &&
-               load(getHidLibraryVersion, "HidSmbus_GetHidLibraryVersion", error);
+               load(getHidLibraryVersion, "HidSmbus_GetHidLibraryVersion", error) &&
+               load(setGpioConfig, "HidSmbus_SetGpioConfig", error) &&
+               load(getGpioConfig, "HidSmbus_GetGpioConfig", error) &&
+               load(readLatch, "HidSmbus_ReadLatch", error) &&
+               load(writeLatch, "HidSmbus_WriteLatch", error);
     }
     ~Api() { if (dll) FreeLibrary(dll); }
 };
@@ -134,14 +146,17 @@ class Bus {
     Api& api_;
     Device handle_ = nullptr;
     DWORD timeoutMs_ = 500;
+    DWORD clockHz_ = 100000;
     WORD transferRetries_ = 0;
     std::atomic<bool>* cancelRequested_ = nullptr;
+    TransferDiagnostics lastDiagnostics_{};
 public:
     Bus(Api& api, Device h, unsigned timeoutMs = 500, unsigned transferRetries = 0,
         std::atomic<bool>* cancelRequested = nullptr)
         : api_(api), handle_(h), timeoutMs_(timeoutMs),
           transferRetries_(static_cast<WORD>(std::min<unsigned>(transferRetries, 1000))),
           cancelRequested_(cancelRequested) {}
+    const TransferDiagnostics& lastDiagnostics() const { return lastDiagnostics_; }
     bool setClock(DWORD hz) {
         // The CP2112 enforces its own transfer timeout. Keep it aligned with
         // the application's timeout instead of relying only on host polling.
@@ -149,7 +164,16 @@ public:
         const WORD hardwareTimeout = static_cast<WORD>(std::min<DWORD>(timeoutMs_, 1000));
         // GetReadResponse has a separate default response timeout of 1000 ms;
         // set it explicitly or a missing device can still block for that default.
+        clockHz_ = hz;
         return api_.setConfig(handle_, hz, 0x02, TRUE, hardwareTimeout, hardwareTimeout,
+                              TRUE, transferRetries_) == 0 &&
+               api_.setTimeouts(handle_, hardwareTimeout) == 0;
+    }
+    // Recover the CP2112 transfer engine after a target disappears mid-stream.
+    bool recover() {
+        cancel();
+        const WORD hardwareTimeout = static_cast<WORD>(std::min<DWORD>(timeoutMs_, 1000));
+        return api_.setConfig(handle_, clockHz_, 0x02, TRUE, hardwareTimeout, hardwareTimeout,
                               TRUE, transferRetries_) == 0 &&
                api_.setTimeouts(handle_, hardwareTimeout) == 0;
     }
@@ -182,7 +206,10 @@ public:
 
     bool read(unsigned address, unsigned reg, unsigned regBytes, unsigned length,
               std::vector<BYTE>& out, TransferDiagnostics* diagnostics = nullptr) {
-        if (diagnostics) *diagnostics = {};
+        TransferDiagnostics localDiagnostics;
+        if (!diagnostics) diagnostics = &localDiagnostics;
+        *diagnostics = {};
+        struct CommitDiagnostics { TransferDiagnostics* source; TransferDiagnostics* target; ~CommitDiagnostics() { *target = *source; } } commit{diagnostics, &lastDiagnostics_};
         if (length < 1 || length > 512 || regBytes < 1 || regBytes > 2) return false;
         if (cancelRequested_ && cancelRequested_->load()) {
             if (diagnostics) diagnostics->cancelled = true;
@@ -231,38 +258,57 @@ public:
         return false;
     }
     bool rawRead(unsigned address, unsigned length, std::vector<BYTE>& out) {
+        lastDiagnostics_ = {};
         if (length < 1 || length > 512) return false;
-        if (api_.readRequest(handle_, static_cast<BYTE>(address << 1), static_cast<WORD>(length)) != 0) return false;
+        const Status requestStatus = api_.readRequest(handle_, static_cast<BYTE>(address << 1), static_cast<WORD>(length));
+        lastDiagnostics_.apiStatus = requestStatus;
+        if (requestStatus != 0) return false;
         out.clear();
         const DWORD start = GetTickCount();
         while (GetTickCount() - start < timeoutMs_) {
             BYTE buf[61]{}, got = 0; int state = TRANSFER_IDLE;
-            if (api_.getReadResponse(handle_, &state, buf, sizeof(buf), &got) != 0) return false;
-            if (state == TRANSFER_ERROR) return false;
+            const Status responseStatus = api_.getReadResponse(handle_, &state, buf, sizeof(buf), &got);
+            lastDiagnostics_.apiStatus = responseStatus;
+            lastDiagnostics_.transferState = state;
+            if (responseStatus != 0) { lastDiagnostics_.timedOut = responseStatus == CP2112_READ_TIMED_OUT; return false; }
+            if (state == TRANSFER_ERROR) { captureTransferStatus(&lastDiagnostics_); return false; }
             if (got) {
                 if (out.size() + got > length) return false;
                 out.insert(out.end(), buf, buf + got);
             }
-            if (state == TRANSFER_COMPLETE) return out.size() == length;
+            if (state == TRANSFER_COMPLETE) { lastDiagnostics_.bytesTransferred = static_cast<unsigned>(out.size()); return out.size() == length; }
             if (state != TRANSFER_BUSY && state != TRANSFER_IDLE) return false;
             Sleep(1);
         }
+        lastDiagnostics_.timedOut = true;
+        cancel(&lastDiagnostics_);
         return false;
     }
     bool writeBytes(unsigned address, const std::vector<BYTE>& bytes) {
+        lastDiagnostics_ = {};
         if (bytes.empty() || bytes.size() > 61) return false;
         auto copy = bytes;
-        if (api_.writeRequest(handle_, static_cast<BYTE>(address << 1), copy.data(), static_cast<BYTE>(copy.size())) != 0) return false;
+        const Status requestStatus = api_.writeRequest(handle_, static_cast<BYTE>(address << 1), copy.data(), static_cast<BYTE>(copy.size()));
+        lastDiagnostics_.apiStatus = requestStatus;
+        if (requestStatus != 0) return false;
         const DWORD start = GetTickCount();
         while (GetTickCount() - start < timeoutMs_) {
-            if (api_.transferStatusRequest(handle_) != 0) return false;
+            const Status statusRequest = api_.transferStatusRequest(handle_);
+            lastDiagnostics_.apiStatus = statusRequest;
+            if (statusRequest != 0) return false;
             int state = TRANSFER_IDLE, detail = 0; WORD retries = 0, transferred = 0;
-            if (api_.getTransferStatusResponse(handle_, &state, &detail, &retries, &transferred) != 0) return false;
+            const Status responseStatus = api_.getTransferStatusResponse(handle_, &state, &detail, &retries, &transferred);
+            lastDiagnostics_.apiStatus = responseStatus;
+            if (responseStatus != 0) return false;
+            lastDiagnostics_.transferState = state; lastDiagnostics_.detailedStatus = detail;
+            lastDiagnostics_.retries = retries; lastDiagnostics_.bytesTransferred = transferred;
             if (state == TRANSFER_COMPLETE) return true;
             if (state == TRANSFER_ERROR) return false;
             if (state != TRANSFER_BUSY && state != TRANSFER_IDLE) return false;
             Sleep(2);
         }
+        lastDiagnostics_.timedOut = true;
+        cancel(&lastDiagnostics_);
         return false;
     }
     bool writeReg(unsigned address, BYTE reg, BYTE value) { return writeBytes(address, {reg, value}); }
