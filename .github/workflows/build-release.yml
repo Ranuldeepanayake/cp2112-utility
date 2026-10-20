@@ -109,21 +109,27 @@ jobs:
           # merge ref GitHub creates for pull_request workflows.
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.pull_request.head.sha }}
 
-      # Action: create distinct executable and package names with the build
-      # timestamp, run number, and beta/production state.
+      # Action: create names with the developer version, build timestamp, run
+      # number, and beta state. Production names have no state suffix.
       - name: Create release names
         id: package
         shell: pwsh
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
+          # Read the developer-controlled semantic version from the checked-in config.
+          $configText = Get-Content 'config\devices.ini' -Raw
+          $versionMatch = [regex]::Match($configText, '(?m)^version\s*=\s*([^\r\n#;]+)\s*$')
+          if (-not $versionMatch.Success) { throw 'config/devices.ini is missing [general] version=' }
+          $version = $versionMatch.Groups[1].Value.Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid semantic version: $version" }
+
           # Build the timestamped beta or production state used in all CI names.
           $timestamp = Get-Date -Format 'ddMMyyyyHHmm'
           $isBeta = -not ('${{ github.event.action }}' -eq 'closed' -and '${{ github.event.pull_request.merged }}' -eq 'true')
-          $state = if ($isBeta) { 'beta' } else { 'release' }
           $executableName = 'cp2112_console'
           $packageSuffix = if ($isBeta) { '-beta' } else { '' }
-          $packageName = "cp2112_utility-$timestamp-$env:GITHUB_RUN_NUMBER$packageSuffix"
+          $packageName = "cp2112_utility-v${version}_${timestamp}_${env:GITHUB_RUN_NUMBER}${packageSuffix}"
           $beta = if ($isBeta) { 'true' } else { 'false' }
           # Publish the generated values to subsequent workflow steps.
           "executable_name=$executableName" >> $env:GITHUB_OUTPUT
@@ -131,7 +137,7 @@ jobs:
           "build_timestamp=$timestamp" >> $env:GITHUB_OUTPUT
           "build_number=$env:GITHUB_RUN_NUMBER" >> $env:GITHUB_OUTPUT
           "beta=$beta" >> $env:GITHUB_OUTPUT
-          "state=$state" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       # Action: prepare CI build metadata in the working copy for this build.
       - name: Prepare packaged build metadata
@@ -522,7 +528,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_NAME: ${{ steps.package.outputs.package_name }}
           PACKAGE_PATH: ${{ steps.archive.outputs.package }}
-          IS_BETA: ${{ github.event.action != 'closed' }}
+          IS_BETA: ${{ steps.package.outputs.beta }}
           TARGET_SHA: ${{ steps.metadata.outputs.commit }}
         shell: pwsh
         run: |
