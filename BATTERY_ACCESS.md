@@ -106,8 +106,8 @@ Read:  [0x44, total_length, subcommand_low, subcommand_high, response...]
 | Write security keys | ✗ | ✓ |
 | Trigger a no-data command (e.g. seal, reset) | ✓ | ✓ |
 
-This is not currently used by any driver in this project. The standard
-0x00/0x23 protocol handles all read operations.
+Used by the `write-mac` action on BQ4050 and BQ40Z60. The bq30z554-R1 does not
+support 0x44 — it uses an older 0x22/0x20 row-write protocol for data flash writes.
 
 ---
 
@@ -290,6 +290,7 @@ needed for the SoH subcommand and for write operations.
 | `enter-unsealed` | No (SHA-1 required) | Yes | Yes |
 | `enter-full-access` | No (SHA-1 required) | Yes | Yes |
 | `read-mac <subcommand> <length>` | Yes | Yes | Yes |
+| `write-mac <subcommand> <byte...>` | No (0x44 not supported) | Yes | Yes |
 | `device-reset` | Yes (MAC 0x0012) | No | Yes (MAC 0x0041) |
 | `led-toggle` | No | Yes | Yes |
 | `led-press` | No | Yes | Yes |
@@ -311,3 +312,63 @@ word/dword value and its decimal equivalent.
 > The length must match the subcommand's actual response size. If the device
 > NACKs or returns a mismatched length byte the action reports failure with
 > a hint to verify the security mode.
+
+### `write-mac` usage
+
+Writes data to a MAC subcommand via ManufacturerBlockAccess (0x44). Takes the
+subcommand in hex followed by one or more data bytes in hex (1–30 bytes).
+Device must be in **UNSEALED** or **FULL ACCESS** mode first.
+
+**Multi-byte input:** the interactive prompt collects the entire data payload as a
+single entry. Enter all data bytes space-separated on one line:
+
+```
+Subcommand (hex): 0x4605
+Data byte(s) (hex, 1–30 bytes): 0x00 0x00
+```
+
+```
+Subcommand (hex): 0x0035
+Data byte(s) (hex, 1–30 bytes): 0x14 0x36 0x72 0x04 0xFF 0xFF 0xFF 0xFF
+```
+
+Each token is parsed independently as a hex value (0x prefix optional). Up to
+30 bytes may be entered on one line.
+
+> **NVM timing:** data flash writes trigger internal NVM programming that takes
+> 50–100 ms. The driver returns immediately after the I2C transaction completes.
+> Wait at least 100 ms before issuing a `read-mac` to verify — reading too soon
+> may return stale data or receive a NACK.
+
+> **Warning:** writes go directly to device data flash. An incorrect subcommand
+> address or wrong value can corrupt gauging calibration. Always read back with
+> `read-mac` to verify, and confirm the subcommand address and data format from
+> the device TRM before proceeding.
+
+### Typical data flash write workflow
+
+```sh
+# 1. Unseal the device
+device BQ4050-1 enter-unsealed
+
+# 2. Confirm the security mode before writing
+device BQ4050-1 security-status
+
+# 3. Write the value (subcommand address and data bytes from the TRM)
+device BQ4050-1 write-mac 0x4605 0x00 0x00
+
+# 4. Read back to verify the write took effect
+device BQ4050-1 read-mac 0x4605 2
+
+# 5. Seal when done
+device BQ4050-1 seal
+```
+
+The same pattern applies to BQ40Z60 — substitute the device name and subcommand
+address from the respective TRM.
+
+**BQ30Z55 note:** `write-mac` is **not available** on the bq30z554-R1. That device
+uses an older data flash write protocol (registers 0x22/0x20, not 0x44) that is not
+supported by this driver. Use `read-mac` for privileged reads if the device is already
+in UNSEALED or FULL ACCESS mode (SHA-1 HMAC required to get there — see §10.5 of
+SLUU511).

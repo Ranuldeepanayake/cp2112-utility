@@ -1,5 +1,6 @@
 // Implements Smart Battery and diagnostic operations for the TI BQ4050 driver.
 #include "DeviceDriver.h"
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -15,6 +16,7 @@ constexpr BYTE COMMAND_BATTERY_STATUS = 0x16;
 constexpr BYTE COMMAND_CYCLE_COUNT = 0x17;
 constexpr BYTE COMMAND_MANUFACTURER_ACCESS = 0x00;
 constexpr BYTE COMMAND_MANUFACTURER_DATA = 0x23;
+constexpr BYTE COMMAND_MANUFACTURER_BLOCK_ACCESS = 0x44;
 constexpr unsigned MAC_SAFETY_ALERT = 0x0050;
 constexpr unsigned MAC_SAFETY_STATUS = 0x0051;
 constexpr unsigned MAC_PF_ALERT = 0x0052;
@@ -236,6 +238,15 @@ struct Bq4050Driver : Driver {
              {"subcommand (hex, e.g. 0x0035)", "length (bytes, 1–32)"},
              "Only subcommands that return a data payload work here; "
              "command-only subcommands (seal, reset, LED) have dedicated actions."},
+            {"write-mac",
+             "Write data to a MAC subcommand via ManufacturerBlockAccess (0x44). "
+             "Requires UNSEALED or FULL ACCESS mode. "
+             "Pass the subcommand followed by one or more data bytes, all in hex. "
+             "Example: write-mac 0x4605 0x00 0x00",
+             {"subcommand (hex)", "data byte(s) (hex, 1–30 bytes)"},
+             "This writes directly to device data flash. An incorrect subcommand address "
+             "or wrong data value can corrupt gauging calibration. Verify the subcommand "
+             "address and expected data format from the device TRM before proceeding."},
         };
     }
 
@@ -341,6 +352,50 @@ struct Bq4050Driver : Driver {
                                     (static_cast<unsigned>(data[2]) << 16) | (static_cast<unsigned>(data[3]) << 24);
                 result += "  (" + hex(dw, 8) + " = " + std::to_string(dw) + ")";
             }
+            return true;
+        }
+
+        if (action == "write-mac") {
+            if (parameters.size() < 2) {
+                result = "write-mac requires a subcommand and at least one data byte";
+                return false;
+            }
+            unsigned subcommand;
+            try { subcommand = static_cast<unsigned>(std::stoul(parameters[0], nullptr, 0)); }
+            catch (...) { result = "Invalid subcommand — expected hex e.g. 0x4605"; return false; }
+            if (subcommand > 0xFFFF) { result = "Subcommand out of range (0x0000–0xFFFF)"; return false; }
+            std::vector<BYTE> data;
+            std::istringstream byteStream(parameters[1]);
+            std::string token;
+            while (byteStream >> token) {
+                unsigned byteVal;
+                try { byteVal = static_cast<unsigned>(std::stoul(token, nullptr, 0)); }
+                catch (...) { result = "Invalid data byte at index " + std::to_string(data.size()) + ": " + token; return false; }
+                if (byteVal > 0xFF) { result = "Data byte at index " + std::to_string(data.size()) + " out of range (0x00–0xFF)"; return false; }
+                data.push_back(static_cast<BYTE>(byteVal));
+            }
+            if (data.empty()) { result = "write-mac requires at least one data byte"; return false; }
+            if (data.size() > 30) { result = "Maximum 30 data bytes per write-mac (SMBus ByteCount limit)"; return false; }
+            // ManufacturerBlockAccess (0x44): [reg, byte_count, subcmd_low, subcmd_high, data...]
+            std::vector<BYTE> packet = {
+                COMMAND_MANUFACTURER_BLOCK_ACCESS,
+                static_cast<BYTE>(2 + data.size()),
+                static_cast<BYTE>(subcommand & 0xFF),
+                static_cast<BYTE>((subcommand >> 8) & 0xFF)
+            };
+            packet.insert(packet.end(), data.begin(), data.end());
+            if (!bus.writeBytes(d.address, packet)) {
+                result = "write-mac failed (subcommand=" + hex(subcommand, 4) +
+                         ") — verify security mode and subcommand address";
+                return false;
+            }
+            std::string bytes;
+            for (size_t i = 0; i < data.size(); ++i) {
+                if (i > 0) bytes += " ";
+                bytes += hex(static_cast<unsigned>(data[i]), 2);
+            }
+            result = "write-mac sent: subcommand=" + hex(subcommand, 4) + " data=[" + bytes + "]"
+                     " — allow 50–100 ms for NVM programming before reading back";
             return true;
         }
 

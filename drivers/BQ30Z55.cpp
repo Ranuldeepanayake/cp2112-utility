@@ -4,8 +4,8 @@
 
 namespace {
 // SBS standard word commands
-constexpr BYTE CMD_MANUFACTURER_ACCESS  = 0x00;
-constexpr BYTE CMD_BATTERY_MODE         = 0x03;
+constexpr BYTE CMD_MANUFACTURER_ACCESS        = 0x00;
+constexpr BYTE CMD_BATTERY_MODE               = 0x03;
 constexpr BYTE CMD_TEMPERATURE          = 0x08;
 constexpr BYTE CMD_VOLTAGE              = 0x09;
 constexpr BYTE CMD_CURRENT              = 0x0A;
