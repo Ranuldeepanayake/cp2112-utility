@@ -22,6 +22,13 @@ struct DeviceConfig {
     bool logStream = true;
     unsigned adapterIndex = 0;
     bool enabled = true;
+    // Optional per-device security keys (0 = use driver default).
+    // unseal_key_1/2 unlock SEALED → UNSEALED.
+    // full_access_key_1/2 unlock UNSEALED → FULL ACCESS.
+    unsigned unsealKey1 = 0;
+    unsigned unsealKey2 = 0;
+    unsigned fullAccessKey1 = 0;
+    unsigned fullAccessKey2 = 0;
 };
 
 class AppMutex {

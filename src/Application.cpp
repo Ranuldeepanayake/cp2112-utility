@@ -178,6 +178,14 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
                 current->logStream = boolean;
             else if (key == "enabled" && parseBool(value, boolean))
                 current->enabled = boolean;
+            else if (key == "unseal_key_1" && parseUnsigned(value, number) && number <= 0xFFFF)
+                current->unsealKey1 = static_cast<unsigned>(number);
+            else if (key == "unseal_key_2" && parseUnsigned(value, number) && number <= 0xFFFF)
+                current->unsealKey2 = static_cast<unsigned>(number);
+            else if (key == "full_access_key_1" && parseUnsigned(value, number) && number <= 0xFFFF)
+                current->fullAccessKey1 = static_cast<unsigned>(number);
+            else if (key == "full_access_key_2" && parseUnsigned(value, number) && number <= 0xFFFF)
+                current->fullAccessKey2 = static_cast<unsigned>(number);
             else {
                 error = "Invalid device setting at line " + std::to_string(lineNumber) +
                         ": " + key + "=" + value;
@@ -209,7 +217,8 @@ bool loadConfig(const std::string& path, AppConfig& config, std::string& error) 
         names[normalizedName] = true;
         if (device.type != "bmp280" && device.type != "mpu6050" &&
             device.type != "bh1750" && device.type != "ds3231" &&
-            device.type != "bq4050" && device.type != "24c32bn" && device.type != "ssd1306") {
+            device.type != "bq4050" && device.type != "bq30z55" && device.type != "bq40z60" &&
+            device.type != "24c32bn" && device.type != "ssd1306") {
             error = "Unsupported device type '" + device.type + "' for " + device.name;
             return false;
         }

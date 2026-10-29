@@ -190,12 +190,14 @@ Run these commands from the **project root** (the directory containing `src/`, `
 
 ### Recommended: build with Make
 
-Install 64-bit MinGW-w64 and `mingw32-make`, then run:
+Install 64-bit MinGW-w64 and `mingw32-make`, then run from **PowerShell or cmd.exe** (not Git Bash):
 
 ```powershell
 mingw32-make check-toolchain
 mingw32-make
 ```
+
+> **Git Bash users:** `mingw32-make` does not work from Git Bash because it picks up Git's `/usr/bin/sh` instead of `cmd.exe`, and the Makefile uses Windows CMD syntax. Use the direct `g++` command in the next section instead, or run `mingw32-make` from PowerShell or cmd.exe.
 
 For an exact match with CI, use the pinned WinLibs archive `x86_64-16.2.0-release-mcf-seh-ucrt-rt_v14-rev1.7z` from the [MinGW-builds-binaries releases](https://github.com/niXman/mingw-builds-binaries/releases) and put its `mingw64\bin` directory first on `PATH`. Its SHA-256 is `f4f9a32681afd5862bdc060dfcf51169e3fc7b4854c1d6d304ba249a51f1df2a`.
 
@@ -212,37 +214,55 @@ mingw32-make clean     # Remove locally built .exe files from bin\
 
 The `run` target must be launched from the project or release-package root so that `config\devices.ini`, `bin\`, and `logs\` resolve correctly.
 
-### 1. Create the output directory if needed
+### Alternative: direct command (CLI)
 
-```powershell
-New-Item -ItemType Directory -Force bin\cli, logs
+Use these commands if `mingw32-make` is unavailable or you are building from Git Bash. Run from the **project root**.
+
+**Step 1 — Create output directories:**
+
+```bash
+mkdir -p build bin/cli logs
 ```
 
-### 2. Compile and link the main application and all drivers
+**Step 2 — Compile the icon resource:**
 
-```powershell
-New-Item -ItemType Directory -Force build, bin\cli, logs
-windres resources\app.rc -O coff -o build\app-res.o
-g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude src\main.cpp src\Application.cpp src\DriverRegistry.cpp drivers\BMP280.cpp drivers\MPU6050.cpp drivers\BH1750.cpp drivers\DS3231.cpp drivers\BQ4050.cpp drivers\24C32BN.cpp drivers\SSD1306.cpp build\app-res.o -o bin\cli\cp2112_console.exe
+```bash
+windres resources/app.rc -O coff -o build/app-res.o
 ```
 
-The build command compiles each `.cpp` file and links them into one executable. The device drivers are logically separate source modules, but they are not separately loaded DLL plugins.
+**Step 3 — Compile and link all sources:**
 
-If you add a driver, include its source file in this command.
+```bash
+g++ -m64 -std=c++17 -O2 -Wall -Wextra -Iinclude \
+  src/main.cpp \
+  src/Application.cpp \
+  src/DriverRegistry.cpp \
+  drivers/BMP280.cpp \
+  drivers/MPU6050.cpp \
+  drivers/BH1750.cpp \
+  drivers/DS3231.cpp \
+  drivers/BQ4050.cpp \
+  drivers/BQ30Z55.cpp \
+  drivers/BQ40Z60.cpp \
+  drivers/24C32BN.cpp \
+  drivers/SSD1306.cpp \
+  build/app-res.o \
+  -o bin/cli/cp2112_console.exe
+```
 
-The direct commands above are equivalent to the Makefile build. If a new driver source file is added, update both the direct command and the `SOURCES` list in `Makefile`.
+Each `.cpp` is compiled and linked in a single pass — the drivers are source modules, not runtime plugins. If you add a driver, include its `.cpp` here and in the `SOURCES` list in `Makefile`.
+
+**Step 4 — Verify the output:**
+
+```bash
+ls bin/cli/
+```
+
+You should see `cp2112_console.exe` and its MinGW runtime DLLs. The Silicon Labs DLLs must be copied separately from the SDK.
 
 ### Executable icon
 
-The executable icon is defined by `resources\app.rc` and `resources\cp2112.ico`. The ICO contains 16×16, 32×32, 48×48, and 256×256 images. Both the Makefile and GitHub Actions compile the resource with `windres` and link the intermediate `build\app-res.o` into `cp2112_console.exe`. The CI toolchain must provide `windres` alongside `g++`.
-
-### 3. Verify the output
-
-```powershell
-Get-ChildItem bin
-```
-
-You should see the CLI executable and its MinGW runtime DLLs in `bin\cli`, plus the two common Silicon Labs DLLs in `bin`. The executable is created by compilation; the Silicon Labs DLLs must be copied from the SDK.
+The executable icon is defined by `resources\app.rc` and `resources\cp2112.ico`. The ICO contains 16×16, 32×32, 48×48, and 256×256 images. Both the Makefile and the direct command compile the resource with `windres` and link the intermediate `build\app-res.o` into `cp2112_console.exe`.
 
 The application creates the configured log directory automatically at startup. It also reports a startup prerequisite warning and stops before hardware access if the configured file, either required Silicon Labs DLL, or the audit log cannot be created.
 
@@ -250,13 +270,30 @@ The application creates the configured log directory automatically at startup. I
 
 The Qt frontend is in `cp2112-utility-gui/`. It links the same `ApplicationService` and device-driver sources used by the CLI, so hardware access, structured readings, scan cancellation, settings persistence, logging, and validation are shared rather than reimplemented.
 
-Open `cp2112-utility-gui/CMakeLists.txt` in Qt Creator, select a 64-bit MinGW kit, configure, and build. Alternatively, from the GUI directory, use a Qt installation's CMake and Ninja tools:
+Open `cp2112-utility-gui/CMakeLists.txt` in Qt Creator, select a 64-bit MinGW kit, configure, and build.
+
+### Alternative: direct command (GUI)
+
+From the `cp2112-utility-gui/` directory, use the Qt installation's CMake and Ninja tools directly. Adjust the Qt and MinGW paths to match your installation:
+
+**PowerShell:**
 
 ```powershell
 $env:Path = "C:\Qt\Tools\Ninja;C:\Qt\Tools\mingw1310_64\bin;" + $env:Path
 cmake -S . -B build\release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:\Qt\6.12.0\mingw_64
 cmake --build build\release --parallel
 ```
+
+**Git Bash:**
+
+```bash
+export PATH="/c/Qt/Tools/Ninja:/c/Qt/Tools/mingw1310_64/bin:$PATH"
+cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH="/c/Qt/6.12.0/mingw_64"
+cmake --build build/release --parallel
+```
+
+The CMake build copies the GUI executable and all required Qt runtime DLLs into `bin\gui` automatically. Common path variables to adjust: `C:\Qt\Tools\Ninja`, `C:\Qt\Tools\mingw1310_64\bin`, and `C:\Qt\6.12.0\mingw_64` — replace `6.12.0` with your installed Qt version and `mingw1310_64` with your MinGW kit name.
 
 Run the GUI from the project root or a release package root so it can locate `config\devices.ini`, `logs\`, and the CP2112 DLLs. The GUI searches the current directory, its executable directory, and the nearby project-parent directories for the configuration file. The GUI uses the Qt runtime files in `bin\gui`; the CLI uses the separate MinGW runtime files in `bin\cli`.
 

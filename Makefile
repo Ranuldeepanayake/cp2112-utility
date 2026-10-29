@@ -27,6 +27,8 @@ SOURCES := \
 	drivers/BH1750.cpp \
 	drivers/DS3231.cpp \
 	drivers/BQ4050.cpp \
+	drivers/BQ30Z55.cpp \
+	drivers/BQ40Z60.cpp \
 	drivers/24C32BN.cpp \
 	drivers/SSD1306.cpp
 # Rebuild when a public header changes.

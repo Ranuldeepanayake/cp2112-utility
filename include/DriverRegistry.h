@@ -9,6 +9,8 @@ std::unique_ptr<Driver> makeMpu6050Driver();
 std::unique_ptr<Driver> makeBh1750Driver();
 std::unique_ptr<Driver> makeDs3231Driver();
 std::unique_ptr<Driver> makeBq4050Driver();
+std::unique_ptr<Driver> makeBq30z55Driver();
+std::unique_ptr<Driver> makeBq40z60Driver();
 std::unique_ptr<Driver> make24c32bnDriver();
 std::unique_ptr<Driver> makeSsd1306Driver();
 std::unique_ptr<Driver> makeDriver(const std::string& type);

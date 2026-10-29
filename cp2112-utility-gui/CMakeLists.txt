@@ -28,6 +28,8 @@ list(APPEND PROJECT_SOURCES
         ${CORE_ROOT}/drivers/BH1750.cpp
         ${CORE_ROOT}/drivers/DS3231.cpp
         ${CORE_ROOT}/drivers/BQ4050.cpp
+        ${CORE_ROOT}/drivers/BQ30Z55.cpp
+        ${CORE_ROOT}/drivers/BQ40Z60.cpp
         ${CORE_ROOT}/drivers/24C32BN.cpp
         ${CORE_ROOT}/drivers/SSD1306.cpp
         ${CORE_ROOT}/include/Application.h
