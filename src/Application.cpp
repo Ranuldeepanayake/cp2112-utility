@@ -1141,6 +1141,47 @@ bool ApplicationService::writeRegister(unsigned deviceAddress, unsigned register
     return true;
 }
 
+// Writes a 16-bit little-endian SMBus word command without changing the
+// existing one-byte Register Access behavior.
+bool ApplicationService::writeWord(unsigned deviceAddress, unsigned registerAddress,
+                                   unsigned value, std::string& error) {
+    error.clear();
+    const auto auditFailure = [this](const std::string& detail) {
+        if (logger_) logger_->audit("Direct register word write failed: " + detail);
+    };
+    if (!initialized_) { error = "Application service is not initialized"; return false; }
+    const AppConfig config = this->config();
+    if (deviceAddress < 0x08 || deviceAddress > 0x77 || registerAddress > 0xFF || value > 0xFFFF) {
+        error = "Device address must be 0x08..0x77, register address 0x00..0xFF, and word value 0x0000..0xFFFF";
+        auditFailure(error); return false;
+    }
+    AppLockGuard hardwareLock(hardwareMutex_);
+    if (config.scanAdapterIndex >= adapterCount_) {
+        error = "No CP2112 adapter is connected at the configured adapter index";
+        auditFailure(error); return false;
+    }
+    DeviceHandle handle(api_);
+    const Status status = api_.open(handle.address(), config.scanAdapterIndex, DEFAULT_VID, DEFAULT_PID);
+    if (status != 0 || !handle.get()) {
+        error = "Could not open adapter for direct word write; status=" + std::to_string(status);
+        auditFailure(error); return false;
+    }
+    Bus bus(api_, handle.get(), config.transferTimeoutMs, config.transferRetries);
+    if (!bus.setClock(config.scanClockHz)) {
+        error = "Failed to set bus clock for direct word write";
+        auditFailure(error); return false;
+    }
+    if (!bus.writeWord(deviceAddress, static_cast<BYTE>(registerAddress), static_cast<WORD>(value))) {
+        signalGpioError(handle.get());
+        if (logger_) logger_->audit("Direct register word write i2c_error=" + transferErrorDescription(bus.lastDiagnostics()));
+        error = "Word write failed at device " + hex(deviceAddress) + ", register " + hex(registerAddress);
+        auditFailure(error); return false;
+    }
+    if (logger_) logger_->audit("Direct register word write device=" + hex(deviceAddress) +
+                               " register=" + hex(registerAddress) + " value=" + hex(value));
+    return true;
+}
+
 // Streams driver readings until the caller's stop flag is set.
 bool ApplicationService::streamDeviceStructured(size_t deviceIndex, std::atomic<bool>& stop,
                                                 const StructuredStreamCallback& callback,

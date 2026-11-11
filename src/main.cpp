@@ -509,7 +509,7 @@ void directRegisterCommand(ApplicationService& app) {
         return;
     }
 
-    std::cout << "Command (r=read, w=write): ";
+    std::cout << "Command (r=read, w=byte write, ww=word write): ";
     std::string command;
     if (!std::getline(std::cin, command) || command.empty()) {
         std::cout << "Invalid command.\n";
@@ -536,8 +536,20 @@ void directRegisterCommand(ApplicationService& app) {
         } else {
             std::cout << "Direct write failed: " << error << "\n";
         }
+    } else if (command == "ww" || command == "WW") {
+        unsigned value = 0;
+        if (!promptUnsigned("Word value (0x0000..0xFFFF): ", 0, value) || value > 0xFFFF) {
+            std::cout << "Invalid word value.\n";
+            return;
+        }
+        if (app.writeWord(deviceAddress, registerAddress, value, error)) {
+            std::cout << "Wrote word " << hex(value) << " to device " << hex(deviceAddress)
+                      << ", register " << hex(registerAddress) << " (little-endian).\n";
+        } else {
+            std::cout << "Direct word write failed: " << error << "\n";
+        }
     } else {
-        std::cout << "Unknown command; use r or w.\n";
+        std::cout << "Unknown command; use r, w, or ww.\n";
     }
 }
 
